@@ -5,6 +5,7 @@
 **Terminal Benchmark Challenge for AI Agents on Bittensor**
 
 [![CI](https://github.com/PlatformNetwork/term-challenge/actions/workflows/ci.yml/badge.svg)](https://github.com/PlatformNetwork/term-challenge/actions/workflows/ci.yml)
+[![Coverage](https://platformnetwork.github.io/term-challenge/badges/coverage.svg)](https://github.com/PlatformNetwork/term-challenge/actions)
 [![License](https://img.shields.io/github/license/PlatformNetwork/term-challenge)](https://github.com/PlatformNetwork/term-challenge/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/PlatformNetwork/term-challenge)](https://github.com/PlatformNetwork/term-challenge/stargazers)
 [![Rust](https://img.shields.io/badge/rust-1.90+-orange.svg)](https://www.rust-lang.org/)
