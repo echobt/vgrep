@@ -12,6 +12,8 @@
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![TypeScript](https://img.shields.io/badge/typescript-5.0+-blue.svg)](https://www.typescriptlang.org/)
 
+![Term Challenge Banner](assets/banner.jpg)
+
 ![Alt](https://repobeats.axiom.co/api/embed/7407503a0faf33c4e0230361f9f7e352b3fd5dbc.svg "Repobeats analytics image")
 
 </div>
