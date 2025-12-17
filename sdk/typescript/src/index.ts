@@ -1,46 +1,26 @@
 /**
  * Term SDK for TypeScript
  * 
- * Build agents for Term Challenge.
- * Agents can use multiple models dynamically.
+ * Build agents with streaming LLM support.
+ * Providers: OpenRouter, Chutes
  * 
- * @example Quick Start
+ * @example Streaming
  * ```typescript
- * import { Agent, Request, Response, run } from 'term-sdk';
+ * const llm = new LLM();
  * 
- * class MyAgent implements Agent {
- *   solve(req: Request): Response {
- *     if (req.step === 1) return Response.cmd("ls -la");
- *     return Response.done();
- *   }
+ * // Stream chunks
+ * for await (const chunk of llm.stream("Tell a story", { model: "claude-3-haiku" })) {
+ *   process.stdout.write(chunk);
  * }
  * 
- * run(new MyAgent());
- * ```
- * 
- * @example With Multiple Models
- * ```typescript
- * import { Agent, Request, Response, LLM, run } from 'term-sdk';
- * 
- * class MultiModelAgent implements Agent {
- *   private llm = new LLM();
- * 
- *   async solve(req: Request): Promise<Response> {
- *     // Use fast model for simple tasks
- *     const analysis = await this.llm.ask(
- *       "Analyze this output briefly",
- *       { model: "claude-3-haiku" }
- *     );
- *     
- *     // Use powerful model for complex reasoning
- *     const solution = await this.llm.ask(
- *       "Solve this problem",
- *       { model: "claude-3-opus" }
- *     );
- *     
- *     return Response.fromLLM(solution.text);
+ * // Stream with callback
+ * const result = await llm.askStream("Solve", {
+ *   model: "gpt-4o",
+ *   onChunk: (text) => {
+ *     console.log(text);
+ *     return !text.includes("ERROR");  // Stop on error
  *   }
- * }
+ * });
  * ```
  */
 
@@ -135,10 +115,7 @@ export class Response {
   }
 
   toJSON(): string {
-    const obj: any = {
-      command: this.command,
-      task_complete: this.taskComplete,
-    };
+    const obj: any = { command: this.command, task_complete: this.taskComplete };
     if (this.text) obj.text = this.text;
     if (this.data) obj.data = this.data;
     return JSON.stringify(obj);
@@ -148,19 +125,12 @@ export class Response {
     text = text.trim();
     const codeMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
     if (codeMatch) text = codeMatch[1];
-
     const start = text.indexOf('{');
     const end = text.lastIndexOf('}');
-
     if (start >= 0 && end > start) {
       try {
         const data = JSON.parse(text.slice(start, end + 1));
-        return new Response(
-          data.command ?? null,
-          data.text ?? null,
-          data.task_complete ?? false,
-          data.data ?? null
-        );
+        return new Response(data.command ?? null, data.text ?? null, data.task_complete ?? false, data.data ?? null);
       } catch { }
     }
     return Response.done();
@@ -191,11 +161,7 @@ export class Tool {
   toJSON(): any {
     return {
       type: "function",
-      function: {
-        name: this.name,
-        description: this.description,
-        parameters: this.parameters,
-      }
+      function: { name: this.name, description: this.description, parameters: this.parameters }
     };
   }
 }
@@ -221,32 +187,15 @@ function log(msg: string): void {
 export async function run(agent: Agent): Promise<void> {
   try {
     if (agent.setup) await agent.setup();
-
     const input = await readStdin();
-    if (!input) {
-      log("No input received");
-      console.log(Response.done().toJSON());
-      return;
-    }
-
+    if (!input) { log("No input"); console.log(Response.done().toJSON()); return; }
     let request: Request;
-    try {
-      request = Request.parse(input);
-    } catch (e) {
-      log(`Invalid JSON: ${e}`);
-      console.log(Response.done().toJSON());
-      return;
-    }
-
+    try { request = Request.parse(input); } catch (e) { log(`Invalid JSON: ${e}`); console.log(Response.done().toJSON()); return; }
     log(`Step ${request.step}: ${request.instruction.slice(0, 50)}...`);
     const response = await agent.solve(request);
     console.log(response.toJSON());
-
     if (agent.cleanup) await agent.cleanup();
-  } catch (e) {
-    log(`Error: ${e}`);
-    console.log(Response.done().toJSON());
-  }
+  } catch (e) { log(`Error: ${e}`); console.log(Response.done().toJSON()); }
 }
 
 async function readStdin(): Promise<string> {
@@ -260,10 +209,13 @@ async function readStdin(): Promise<string> {
 }
 
 // ============================================================================
-// LLM Client
+// LLM Client with Streaming
 // ============================================================================
 
+export type Provider = 'openrouter' | 'chutes';
+
 export interface LLMOptions {
+  provider?: Provider;
   defaultModel?: string;
   temperature?: number;
   maxTokens?: number;
@@ -275,6 +227,7 @@ export interface ChatOptions {
   tools?: Tool[];
   temperature?: number;
   maxTokens?: number;
+  onChunk?: (chunk: string) => boolean;  // Return false to stop
 }
 
 export interface LLMResponse {
@@ -302,24 +255,46 @@ export interface ModelStats {
 
 type FunctionHandler = (args: Record<string, any>) => any | Promise<any>;
 
+const PROVIDERS: Record<Provider, { url: string; envKey: string }> = {
+  openrouter: { url: 'https://openrouter.ai/api/v1/chat/completions', envKey: 'OPENROUTER_API_KEY' },
+  chutes: { url: 'https://llm.chutes.ai/v1/chat/completions', envKey: 'CHUTES_API_KEY' },
+};
+
+const PRICING: Record<string, [number, number]> = {
+  'claude-3-haiku': [0.25, 1.25],
+  'claude-3-sonnet': [3.0, 15.0],
+  'claude-3-opus': [15.0, 75.0],
+  'gpt-4o': [5.0, 15.0],
+  'gpt-4o-mini': [0.15, 0.6],
+  'llama-3': [0.2, 0.2],
+  'mixtral': [0.5, 0.5],
+  'qwen': [0.2, 0.2],
+};
+
 /**
- * LLM client with dynamic model selection.
+ * LLM client with streaming support.
  * 
  * @example
  * ```typescript
  * const llm = new LLM();
  * 
- * // Use different models for different tasks
- * const quick = await llm.ask("Simple question", { model: "claude-3-haiku" });
- * const complex = await llm.ask("Complex analysis", { model: "claude-3-opus" });
- * const code = await llm.ask("Write code", { model: "gpt-4o" });
+ * // Regular call
+ * const result = await llm.ask("Question", { model: "claude-3-haiku" });
  * 
- * // Get stats per model
- * console.log(llm.getStats("claude-3-haiku"));
- * console.log(llm.getStats()); // All stats
+ * // Streaming
+ * for await (const chunk of llm.stream("Story", { model: "claude-3-opus" })) {
+ *   process.stdout.write(chunk);
+ * }
+ * 
+ * // Stream with early stop
+ * const result = await llm.askStream("Task", {
+ *   model: "gpt-4o",
+ *   onChunk: (text) => !text.includes("DONE")
+ * });
  * ```
  */
 export class LLM {
+  private provider: Provider;
   private defaultModel?: string;
   private temperature: number;
   private maxTokens: number;
@@ -334,22 +309,25 @@ export class LLM {
   requestCount = 0;
 
   constructor(options: LLMOptions = {}) {
+    this.provider = options.provider || 'openrouter';
     this.defaultModel = options.defaultModel;
     this.temperature = options.temperature ?? 0.3;
     this.maxTokens = options.maxTokens ?? 4096;
     this.timeout = options.timeout ?? 120000;
-    this.apiUrl = process.env.LLM_API_URL || 'https://openrouter.ai/api/v1/chat/completions';
-    this.apiKey = process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || '';
+
+    const config = PROVIDERS[this.provider];
+    this.apiUrl = process.env.LLM_API_URL || config.url;
+    this.apiKey = process.env.LLM_API_KEY || process.env[config.envKey] || '';
 
     if (!this.apiKey) {
-      console.error('[llm] Warning: LLM_API_KEY or OPENROUTER_API_KEY not set');
+      console.error(`[llm] Warning: LLM_API_KEY or ${config.envKey} not set`);
     }
   }
 
   private getModel(model?: string): string {
     if (model) return model;
     if (this.defaultModel) return this.defaultModel;
-    throw new Error("No model specified. Pass model in options or set defaultModel.");
+    throw new Error("No model specified");
   }
 
   registerFunction(name: string, handler: FunctionHandler): void {
@@ -357,67 +335,159 @@ export class LLM {
   }
 
   async ask(prompt: string, options: ChatOptions = {}): Promise<LLMResponse> {
-    const messages: Message[] = [];
-    messages.push({ role: 'user', content: prompt });
+    const messages: Message[] = [{ role: 'user', content: prompt }];
     return this.chat(messages, options);
   }
 
-  async askWithSystem(prompt: string, system: string, options: ChatOptions = {}): Promise<LLMResponse> {
-    const messages: Message[] = [
-      { role: 'system', content: system },
-      { role: 'user', content: prompt }
-    ];
-    return this.chat(messages, options);
+  async* stream(prompt: string, options: ChatOptions = {}): AsyncGenerator<string> {
+    const messages: Message[] = [{ role: 'user', content: prompt }];
+    yield* this.chatStream(messages, options);
+  }
+
+  async askStream(prompt: string, options: ChatOptions = {}): Promise<LLMResponse> {
+    const messages: Message[] = [{ role: 'user', content: prompt }];
+    return this.chatStreamFull(messages, options);
   }
 
   async chat(messages: Message[], options: ChatOptions = {}): Promise<LLMResponse> {
     const model = this.getModel(options.model);
-    const temperature = options.temperature ?? this.temperature;
-    const maxTokens = options.maxTokens ?? this.maxTokens;
     const start = Date.now();
 
     const payload: any = {
       model,
       messages,
-      temperature,
-      max_tokens: maxTokens,
+      temperature: options.temperature ?? this.temperature,
+      max_tokens: options.maxTokens ?? this.maxTokens,
+      stream: false,
     };
 
-    if (options.tools && options.tools.length > 0) {
+    if (options.tools?.length) {
       payload.tools = options.tools.map(t => t.toJSON());
       payload.tool_choice = "auto";
     }
 
     const response = await fetch(this.apiUrl, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKey}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Authorization': `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(this.timeout),
     });
 
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`API error: ${response.status}`);
 
     const data = await response.json() as any;
+    return this.parseResponse(data, model, start);
+  }
+
+  async* chatStream(messages: Message[], options: ChatOptions = {}): AsyncGenerator<string> {
+    const model = this.getModel(options.model);
+
+    const payload = {
+      model,
+      messages,
+      temperature: options.temperature ?? this.temperature,
+      max_tokens: options.maxTokens ?? this.maxTokens,
+      stream: true,
+    };
+
+    const response = await fetch(this.apiUrl, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) throw new Error(`API error: ${response.status}`);
+    if (!response.body) throw new Error("No response body");
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6);
+          if (data === '[DONE]') return;
+          try {
+            const chunk = JSON.parse(data);
+            const content = chunk.choices?.[0]?.delta?.content || '';
+            if (content) yield content;
+          } catch { }
+        }
+      }
+    }
+  }
+
+  async chatStreamFull(messages: Message[], options: ChatOptions = {}): Promise<LLMResponse> {
+    const model = this.getModel(options.model);
+    const start = Date.now();
+    let fullText = '';
+
+    for await (const chunk of this.chatStream(messages, options)) {
+      fullText += chunk;
+      if (options.onChunk && !options.onChunk(chunk)) break;
+    }
+
+    const latencyMs = Date.now() - start;
+    const estTokens = Math.ceil(fullText.length / 4);
+    const cost = this.calculateCost(model, estTokens / 2, estTokens / 2);
+
+    this.totalTokens += estTokens;
+    this.totalCost += cost;
+    this.requestCount++;
+    this.updateModelStats(model, estTokens, cost);
+
+    return { text: fullText, model, tokens: estTokens, cost, latencyMs, functionCalls: [] };
+  }
+
+  async chatWithFunctions(messages: Message[], tools: Tool[], options: ChatOptions & { maxIterations?: number } = {}): Promise<LLMResponse> {
+    const maxIterations = options.maxIterations ?? 10;
+    const msgs = [...messages];
+
+    for (let i = 0; i < maxIterations; i++) {
+      const response = await this.chat(msgs, { ...options, tools });
+      if (response.functionCalls.length === 0) return response;
+
+      for (const call of response.functionCalls) {
+        try {
+          const result = await this.executeFunction(call);
+          msgs.push({
+            role: 'assistant', content: null,
+            tool_calls: [{ id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } }]
+          });
+          msgs.push({ role: 'tool', tool_call_id: call.id, content: typeof result === 'string' ? result : JSON.stringify(result) });
+        } catch (e) {
+          msgs.push({ role: 'tool', tool_call_id: call.id, content: `Error: ${e}` });
+        }
+      }
+    }
+    return this.chat(msgs, { ...options, tools });
+  }
+
+  async executeFunction(call: FunctionCall): Promise<any> {
+    const handler = this.functionHandlers.get(call.name);
+    if (!handler) throw new Error(`Unknown function: ${call.name}`);
+    return handler(call.arguments);
+  }
+
+  private parseResponse(data: any, model: string, start: number): LLMResponse {
     const choice = data.choices?.[0] || {};
     const message = choice.message || {};
-
     const text = message.content || '';
-    const functionCalls: FunctionCall[] = [];
 
+    const functionCalls: FunctionCall[] = [];
     for (const tc of message.tool_calls || []) {
       if (tc.type === 'function') {
         let args = {};
         try { args = JSON.parse(tc.function?.arguments || '{}'); } catch { }
-        functionCalls.push({
-          name: tc.function?.name || '',
-          arguments: args,
-          id: tc.id,
-        });
+        functionCalls.push({ name: tc.function?.name || '', arguments: args, id: tc.id });
       }
     }
 
@@ -427,107 +497,36 @@ export class LLM {
     const cost = this.calculateCost(model, promptTokens, completionTokens);
     const latencyMs = Date.now() - start;
 
-    // Update stats
     this.totalTokens += tokens;
     this.totalCost += cost;
     this.requestCount++;
-
-    // Per-model stats
-    const modelStats = this.stats.get(model) || { tokens: 0, cost: 0, requests: 0 };
-    modelStats.tokens += tokens;
-    modelStats.cost += cost;
-    modelStats.requests++;
-    this.stats.set(model, modelStats);
+    this.updateModelStats(model, tokens, cost);
 
     console.error(`[llm] ${model}: ${tokens} tokens, $${cost.toFixed(4)}, ${latencyMs}ms`);
 
     return { text, model, tokens, cost, latencyMs, functionCalls, raw: data };
   }
 
-  async executeFunction(call: FunctionCall): Promise<any> {
-    const handler = this.functionHandlers.get(call.name);
-    if (!handler) throw new Error(`Unknown function: ${call.name}`);
-    return handler(call.arguments);
-  }
-
-  async chatWithFunctions(
-    messages: Message[],
-    tools: Tool[],
-    options: ChatOptions & { maxIterations?: number } = {}
-  ): Promise<LLMResponse> {
-    const maxIterations = options.maxIterations ?? 10;
-    const msgs = [...messages];
-
-    for (let i = 0; i < maxIterations; i++) {
-      const response = await this.chat(msgs, { ...options, tools });
-
-      if (response.functionCalls.length === 0) {
-        return response;
-      }
-
-      for (const call of response.functionCalls) {
-        try {
-          const result = await this.executeFunction(call);
-          msgs.push({
-            role: 'assistant',
-            content: null,
-            tool_calls: [{
-              id: call.id,
-              type: 'function',
-              function: { name: call.name, arguments: JSON.stringify(call.arguments) }
-            }]
-          });
-          msgs.push({
-            role: 'tool',
-            tool_call_id: call.id,
-            content: typeof result === 'string' ? result : JSON.stringify(result),
-          });
-        } catch (e) {
-          msgs.push({
-            role: 'tool',
-            tool_call_id: call.id,
-            content: `Error: ${e}`,
-          });
-        }
-      }
-    }
-
-    return this.chat(msgs, { ...options, tools });
-  }
-
-  getStats(model?: string): ModelStats | { totalTokens: number; totalCost: number; requestCount: number; perModel: Record<string, ModelStats> } {
-    if (model) {
-      return this.stats.get(model) || { tokens: 0, cost: 0, requests: 0 };
-    }
-    const perModel: Record<string, ModelStats> = {};
-    this.stats.forEach((v, k) => { perModel[k] = v; });
-    return {
-      totalTokens: this.totalTokens,
-      totalCost: this.totalCost,
-      requestCount: this.requestCount,
-      perModel,
-    };
+  private updateModelStats(model: string, tokens: number, cost: number): void {
+    const stats = this.stats.get(model) || { tokens: 0, cost: 0, requests: 0 };
+    stats.tokens += tokens;
+    stats.cost += cost;
+    stats.requests++;
+    this.stats.set(model, stats);
   }
 
   private calculateCost(model: string, promptTokens: number, completionTokens: number): number {
-    const pricing: Record<string, [number, number]> = {
-      'claude-3-haiku': [0.25, 1.25],
-      'claude-3-sonnet': [3.0, 15.0],
-      'claude-3-opus': [15.0, 75.0],
-      'gpt-4o': [5.0, 15.0],
-      'gpt-4o-mini': [0.15, 0.6],
-      'llama-3': [0.2, 0.2],
-      'mixtral': [0.5, 0.5],
-    };
-
     let [inputPrice, outputPrice] = [0.5, 1.5];
-    for (const [key, prices] of Object.entries(pricing)) {
-      if (model.toLowerCase().includes(key)) {
-        [inputPrice, outputPrice] = prices;
-        break;
-      }
+    for (const [key, prices] of Object.entries(PRICING)) {
+      if (model.toLowerCase().includes(key)) { [inputPrice, outputPrice] = prices; break; }
     }
-
     return (promptTokens * inputPrice + completionTokens * outputPrice) / 1_000_000;
+  }
+
+  getStats(model?: string): ModelStats | { totalTokens: number; totalCost: number; requestCount: number; perModel: Record<string, ModelStats> } {
+    if (model) return this.stats.get(model) || { tokens: 0, cost: 0, requests: 0 };
+    const perModel: Record<string, ModelStats> = {};
+    this.stats.forEach((v, k) => { perModel[k] = v; });
+    return { totalTokens: this.totalTokens, totalCost: this.totalCost, requestCount: this.requestCount, perModel };
   }
 }

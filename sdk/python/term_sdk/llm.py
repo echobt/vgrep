@@ -1,21 +1,28 @@
 """
 LLM Client for Term Challenge agents.
 
-Agents can use multiple models dynamically - specify the model on each call.
+Supports OpenRouter and Chutes providers with streaming.
 
 Example:
     ```python
     from term_sdk import LLM
     
-    llm = LLM()  # No default model needed
+    llm = LLM()
     
-    # Use different models for different tasks
-    result = llm.ask("Quick question", model="claude-3-haiku")
-    result = llm.ask("Complex analysis", model="claude-3-opus")
-    result = llm.ask("Code generation", model="gpt-4o")
+    # Regular call
+    result = llm.ask("Hello", model="claude-3-haiku")
     
-    # With function calling
-    result = llm.chat(messages, tools=tools, model="claude-3-sonnet")
+    # Streaming - see response in real-time
+    for chunk in llm.stream("Write a story", model="claude-3-haiku"):
+        print(chunk, end="", flush=True)
+    
+    # Stream with callback
+    def on_chunk(text):
+        if "error" in text.lower():
+            return False  # Stop streaming
+        return True
+    
+    result = llm.ask_stream("Solve this", model="gpt-4o", on_chunk=on_chunk)
     ```
 """
 
@@ -24,7 +31,7 @@ import sys
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Any, Callable, Iterator, Union
 import httpx
 
 from .types import Tool, FunctionCall
@@ -59,7 +66,6 @@ class LLMResponse:
         return None
     
     def has_function_calls(self) -> bool:
-        """Check if response has function calls."""
         return len(self.function_calls) > 0
 
 
@@ -67,16 +73,43 @@ def _log(msg: str):
     print(f"[llm] {msg}", file=sys.stderr)
 
 
+# Provider configurations
+PROVIDERS = {
+    "openrouter": {
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "env_key": "OPENROUTER_API_KEY",
+    },
+    "chutes": {
+        "url": "https://llm.chutes.ai/v1/chat/completions",
+        "env_key": "CHUTES_API_KEY",
+    },
+}
+
+# Model pricing per 1M tokens (input, output)
+PRICING = {
+    "claude-3-haiku": (0.25, 1.25),
+    "claude-3-sonnet": (3.0, 15.0),
+    "claude-3-opus": (15.0, 75.0),
+    "claude-3.5-sonnet": (3.0, 15.0),
+    "gpt-4o": (5.0, 15.0),
+    "gpt-4o-mini": (0.15, 0.6),
+    "gpt-4-turbo": (10.0, 30.0),
+    "llama-3": (0.2, 0.2),
+    "mixtral": (0.5, 0.5),
+    "qwen": (0.2, 0.2),
+}
+
+
 class LLM:
     """
-    LLM client for inference with dynamic model selection.
+    LLM client with streaming support.
     
-    Agents can use multiple models - specify the model on each call.
-    The provider is determined at runtime based on environment configuration.
+    Providers: OpenRouter, Chutes
     
     Args:
-        default_model: Default model if not specified per-call (optional)
-        temperature: Default sampling temperature (0.0 - 2.0)
+        provider: "openrouter" (default) or "chutes"
+        default_model: Default model if not specified per-call
+        temperature: Default sampling temperature
         max_tokens: Default maximum response tokens
         timeout: Request timeout in seconds
     
@@ -84,47 +117,48 @@ class LLM:
         ```python
         llm = LLM()
         
-        # Different models for different tasks
-        quick = llm.ask("What is 2+2?", model="claude-3-haiku")
-        detailed = llm.ask("Explain quantum physics", model="claude-3-opus")
-        code = llm.ask("Write a Python function", model="gpt-4o")
+        # Regular call
+        result = llm.ask("Question", model="claude-3-haiku")
         
-        # Override parameters per call
-        result = llm.ask(
-            "Creative story",
-            model="claude-3-sonnet",
-            temperature=0.9,
-            max_tokens=2000
-        )
+        # Streaming
+        for chunk in llm.stream("Long question", model="claude-3-opus"):
+            print(chunk, end="", flush=True)
         
-        # Chat with specific model
-        result = llm.chat(
-            messages=[{"role": "user", "content": "Hello"}],
-            model="gpt-4o-mini"
+        # Stream with early stop
+        result = llm.ask_stream(
+            "Task",
+            model="gpt-4o",
+            on_chunk=lambda text: "STOP" not in text
         )
         ```
     """
     
     def __init__(
         self,
+        provider: str = "openrouter",
         default_model: Optional[str] = None,
         temperature: float = 0.3,
         max_tokens: int = 4096,
         timeout: int = 120,
     ):
+        self.provider = provider
         self.default_model = default_model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout
         
-        # Get API configuration from environment
-        self._api_url = os.environ.get("LLM_API_URL", "https://openrouter.ai/api/v1/chat/completions")
-        self._api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENROUTER_API_KEY", "")
+        # Get provider config
+        if provider not in PROVIDERS:
+            raise ValueError(f"Unknown provider: {provider}. Use 'openrouter' or 'chutes'")
+        
+        config = PROVIDERS[provider]
+        self._api_url = os.environ.get("LLM_API_URL", config["url"])
+        self._api_key = os.environ.get("LLM_API_KEY") or os.environ.get(config["env_key"], "")
         
         if not self._api_key:
-            _log("Warning: LLM_API_KEY or OPENROUTER_API_KEY not set")
+            _log(f"Warning: LLM_API_KEY or {config['env_key']} not set")
         
-        # Stats per model
+        # Stats
         self.stats: Dict[str, Dict[str, Any]] = {}
         self.total_tokens = 0
         self.total_cost = 0.0
@@ -137,7 +171,6 @@ class LLM:
         self._function_handlers: Dict[str, Callable] = {}
     
     def _get_model(self, model: Optional[str]) -> str:
-        """Get model to use, with fallback to default."""
         if model:
             return model
         if self.default_model:
@@ -157,31 +190,78 @@ class LLM:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> LLMResponse:
+        """Ask a question (non-streaming)."""
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        return self.chat(messages, model=model, tools=tools, 
+                        temperature=temperature, max_tokens=max_tokens)
+    
+    def stream(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+        system: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Iterator[str]:
         """
-        Ask a question with specified model.
+        Stream response chunks.
         
-        Args:
-            prompt: User prompt
-            model: Model to use (required if no default_model)
-            system: Optional system prompt
-            tools: Optional list of tools/functions
-            temperature: Override default temperature
-            max_tokens: Override default max_tokens
+        Yields text chunks as they arrive.
         
-        Returns:
-            LLMResponse with text, function_calls, tokens, cost
+        Example:
+            ```python
+            for chunk in llm.stream("Tell me a story", model="claude-3-haiku"):
+                print(chunk, end="", flush=True)
+            ```
         """
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        return self.chat(
-            messages,
-            model=model,
-            tools=tools,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        yield from self.chat_stream(messages, model=model,
+                                    temperature=temperature, max_tokens=max_tokens)
+    
+    def ask_stream(
+        self,
+        prompt: str,
+        model: Optional[str] = None,
+        system: Optional[str] = None,
+        on_chunk: Optional[Callable[[str], bool]] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> LLMResponse:
+        """
+        Stream with callback, return full response.
+        
+        Args:
+            prompt: User prompt
+            model: Model to use
+            system: System prompt
+            on_chunk: Callback for each chunk. Return False to stop.
+            temperature: Sampling temperature
+            max_tokens: Max tokens
+        
+        Returns:
+            LLMResponse with full text
+        
+        Example:
+            ```python
+            def check(chunk):
+                print(chunk, end="")
+                return "ERROR" not in chunk  # Stop on error
+            
+            result = llm.ask_stream("Solve", model="gpt-4o", on_chunk=check)
+            ```
+        """
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        return self.chat_stream_full(messages, model=model, on_chunk=on_chunk,
+                                     temperature=temperature, max_tokens=max_tokens)
     
     def chat(
         self,
@@ -191,117 +271,115 @@ class LLM:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> LLMResponse:
-        """
-        Chat with message history using specified model.
-        
-        Args:
-            messages: List of {"role": "user/assistant/system", "content": "..."}
-            model: Model to use (required if no default_model)
-            tools: Optional list of tools/functions for function calling
-            temperature: Override default temperature
-            max_tokens: Override default max_tokens
-        
-        Returns:
-            LLMResponse with text, function_calls, tokens, cost
-        """
+        """Chat (non-streaming)."""
         model = self._get_model(model)
         temp = temperature if temperature is not None else self.temperature
         tokens = max_tokens if max_tokens is not None else self.max_tokens
         
         start = time.time()
         
-        try:
-            # Build request
-            payload: Dict[str, Any] = {
-                "model": model,
-                "messages": messages,
-                "temperature": temp,
-                "max_tokens": tokens,
-            }
-            
-            # Add tools if provided
-            if tools:
-                payload["tools"] = [t.to_dict() for t in tools]
-                payload["tool_choice"] = "auto"
-            
-            # Make request
-            headers = {
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            }
-            
-            response = self._client.post(
-                self._api_url,
-                headers=headers,
-                json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
-            
-            # Parse response
-            choice = data.get("choices", [{}])[0]
-            message = choice.get("message", {})
-            
-            text = message.get("content", "") or ""
-            
-            # Parse function calls
-            function_calls = []
-            tool_calls = message.get("tool_calls", [])
-            for tc in tool_calls:
-                if tc.get("type") == "function":
-                    func = tc.get("function", {})
-                    try:
-                        args = json.loads(func.get("arguments", "{}"))
-                    except:
-                        args = {}
-                    function_calls.append(FunctionCall(
-                        name=func.get("name", ""),
-                        arguments=args,
-                        id=tc.get("id"),
-                    ))
-            
-            # Calculate tokens and cost
-            usage = data.get("usage", {})
-            prompt_tokens = usage.get("prompt_tokens", 0)
-            completion_tokens = usage.get("completion_tokens", 0)
-            total_tokens = prompt_tokens + completion_tokens
-            
-            cost = self._calculate_cost(model, prompt_tokens, completion_tokens)
-            latency_ms = int((time.time() - start) * 1000)
-            
-            # Update stats
-            self.total_tokens += total_tokens
-            self.total_cost += cost
-            self.request_count += 1
-            
-            # Per-model stats
-            if model not in self.stats:
-                self.stats[model] = {"tokens": 0, "cost": 0.0, "requests": 0}
-            self.stats[model]["tokens"] += total_tokens
-            self.stats[model]["cost"] += cost
-            self.stats[model]["requests"] += 1
-            
-            _log(f"{model}: {total_tokens} tokens, ${cost:.4f}, {latency_ms}ms")
-            
-            return LLMResponse(
-                text=text,
-                model=model,
-                tokens=total_tokens,
-                cost=cost,
-                latency_ms=latency_ms,
-                function_calls=function_calls,
-                raw=data,
-            )
-            
-        except Exception as e:
-            _log(f"Error: {e}")
-            raise
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temp,
+            "max_tokens": tokens,
+            "stream": False,
+        }
+        
+        if tools:
+            payload["tools"] = [t.to_dict() for t in tools]
+            payload["tool_choice"] = "auto"
+        
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        
+        response = self._client.post(self._api_url, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        
+        return self._parse_response(data, model, start)
     
-    def execute_function(self, call: FunctionCall) -> Any:
-        """Execute a registered function."""
-        if call.name not in self._function_handlers:
-            raise ValueError(f"Unknown function: {call.name}")
-        return self._function_handlers[call.name](**call.arguments)
+    def chat_stream(
+        self,
+        messages: List[Dict[str, str]],
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Iterator[str]:
+        """Stream chat response chunks."""
+        model = self._get_model(model)
+        temp = temperature if temperature is not None else self.temperature
+        tokens = max_tokens if max_tokens is not None else self.max_tokens
+        
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temp,
+            "max_tokens": tokens,
+            "stream": True,
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        
+        with self._client.stream("POST", self._api_url, headers=headers, json=payload) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if line.startswith("data: "):
+                    data = line[6:]
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                        delta = chunk.get("choices", [{}])[0].get("delta", {})
+                        content = delta.get("content", "")
+                        if content:
+                            yield content
+                    except json.JSONDecodeError:
+                        pass
+    
+    def chat_stream_full(
+        self,
+        messages: List[Dict[str, str]],
+        model: Optional[str] = None,
+        on_chunk: Optional[Callable[[str], bool]] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> LLMResponse:
+        """Stream and collect full response."""
+        model = self._get_model(model)
+        start = time.time()
+        full_text = ""
+        
+        for chunk in self.chat_stream(messages, model=model, 
+                                      temperature=temperature, max_tokens=max_tokens):
+            full_text += chunk
+            if on_chunk and not on_chunk(chunk):
+                break
+        
+        latency_ms = int((time.time() - start) * 1000)
+        
+        # Estimate tokens (actual count not available in streaming)
+        est_tokens = len(full_text) // 4
+        cost = self._calculate_cost(model, est_tokens // 2, est_tokens // 2)
+        
+        self.total_tokens += est_tokens
+        self.total_cost += cost
+        self.request_count += 1
+        
+        self._update_model_stats(model, est_tokens, cost)
+        
+        return LLMResponse(
+            text=full_text,
+            model=model,
+            tokens=est_tokens,
+            cost=cost,
+            latency_ms=latency_ms,
+        )
     
     def chat_with_functions(
         self,
@@ -312,38 +390,16 @@ class LLM:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> LLMResponse:
-        """
-        Chat with automatic function execution.
-        
-        Automatically executes function calls and continues conversation
-        until the model returns a text response.
-        
-        Args:
-            messages: Initial messages
-            tools: Available tools
-            model: Model to use
-            max_iterations: Max function call iterations
-            temperature: Override default temperature
-            max_tokens: Override default max_tokens
-        
-        Returns:
-            Final LLMResponse
-        """
-        messages = list(messages)  # Copy
+        """Chat with automatic function execution."""
+        messages = list(messages)
         
         for _ in range(max_iterations):
-            response = self.chat(
-                messages,
-                model=model,
-                tools=tools,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+            response = self.chat(messages, model=model, tools=tools,
+                               temperature=temperature, max_tokens=max_tokens)
             
             if not response.function_calls:
                 return response
             
-            # Execute functions and add results
             for call in response.function_calls:
                 try:
                     result = self.execute_function(call)
@@ -373,8 +429,73 @@ class LLM:
         
         return response
     
+    def execute_function(self, call: FunctionCall) -> Any:
+        """Execute a registered function."""
+        if call.name not in self._function_handlers:
+            raise ValueError(f"Unknown function: {call.name}")
+        return self._function_handlers[call.name](**call.arguments)
+    
+    def _parse_response(self, data: Dict, model: str, start: float) -> LLMResponse:
+        choice = data.get("choices", [{}])[0]
+        message = choice.get("message", {})
+        text = message.get("content", "") or ""
+        
+        function_calls = []
+        for tc in message.get("tool_calls", []):
+            if tc.get("type") == "function":
+                func = tc.get("function", {})
+                try:
+                    args = json.loads(func.get("arguments", "{}"))
+                except:
+                    args = {}
+                function_calls.append(FunctionCall(
+                    name=func.get("name", ""),
+                    arguments=args,
+                    id=tc.get("id"),
+                ))
+        
+        usage = data.get("usage", {})
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        total_tokens = prompt_tokens + completion_tokens
+        
+        cost = self._calculate_cost(model, prompt_tokens, completion_tokens)
+        latency_ms = int((time.time() - start) * 1000)
+        
+        self.total_tokens += total_tokens
+        self.total_cost += cost
+        self.request_count += 1
+        self._update_model_stats(model, total_tokens, cost)
+        
+        _log(f"{model}: {total_tokens} tokens, ${cost:.4f}, {latency_ms}ms")
+        
+        return LLMResponse(
+            text=text,
+            model=model,
+            tokens=total_tokens,
+            cost=cost,
+            latency_ms=latency_ms,
+            function_calls=function_calls,
+            raw=data,
+        )
+    
+    def _update_model_stats(self, model: str, tokens: int, cost: float):
+        if model not in self.stats:
+            self.stats[model] = {"tokens": 0, "cost": 0.0, "requests": 0}
+        self.stats[model]["tokens"] += tokens
+        self.stats[model]["cost"] += cost
+        self.stats[model]["requests"] += 1
+    
+    def _calculate_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
+        input_price, output_price = 0.5, 1.5
+        for key, prices in PRICING.items():
+            if key in model.lower():
+                input_price, output_price = prices
+                break
+        return (prompt_tokens * input_price + completion_tokens * output_price) / 1_000_000
+    
     def get_stats(self, model: Optional[str] = None) -> Dict[str, Any]:
-        """Get usage stats, optionally for a specific model."""
+        """Get usage stats."""
         if model:
             return self.stats.get(model, {"tokens": 0, "cost": 0.0, "requests": 0})
         return {
@@ -384,33 +505,7 @@ class LLM:
             "per_model": self.stats,
         }
     
-    def _calculate_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
-        """Calculate cost based on model pricing."""
-        # Pricing per 1M tokens (input, output)
-        pricing = {
-            "claude-3-haiku": (0.25, 1.25),
-            "claude-3-sonnet": (3.0, 15.0),
-            "claude-3-opus": (15.0, 75.0),
-            "claude-3.5-sonnet": (3.0, 15.0),
-            "gpt-4o": (5.0, 15.0),
-            "gpt-4o-mini": (0.15, 0.6),
-            "gpt-4-turbo": (10.0, 30.0),
-            "gpt-3.5-turbo": (0.5, 1.5),
-            "llama-3": (0.2, 0.2),
-            "mixtral": (0.5, 0.5),
-        }
-        
-        # Find matching pricing
-        input_price, output_price = 0.5, 1.5  # Default
-        for key, prices in pricing.items():
-            if key in model.lower():
-                input_price, output_price = prices
-                break
-        
-        return (prompt_tokens * input_price + completion_tokens * output_price) / 1_000_000
-    
     def close(self):
-        """Close HTTP client."""
         self._client.close()
     
     def __enter__(self):
