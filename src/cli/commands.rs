@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use console::style;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::interactive;
 use crate::config::{Config, Mode};
@@ -542,14 +542,20 @@ fn run_index(
 fn run_search_smart(
     config: &Config,
     query: &str,
-    path: &PathBuf,
+    path: &Path,
     max_results: usize,
     show_content: bool,
     interactive: bool,
     sync: bool,
 ) -> Result<()> {
     if sync {
-        run_index(config, path.clone(), false, config.max_file_size, false)?;
+        run_index(
+            config,
+            path.to_path_buf(),
+            false,
+            config.max_file_size,
+            false,
+        )?;
     }
 
     match config.mode {
@@ -584,7 +590,7 @@ fn run_search_smart(
 fn run_search_server(
     client: &Client,
     query: &str,
-    path: &PathBuf,
+    path: &Path,
     max_results: usize,
     show_content: bool,
 ) -> Result<()> {
@@ -599,7 +605,7 @@ fn run_search_server(
     println!();
 
     let start = Instant::now();
-    let response = client.search(query, Some(path.as_path()), max_results)?;
+    let response = client.search(query, Some(path), max_results)?;
     let elapsed = start.elapsed();
 
     if response.results.is_empty() {
@@ -643,7 +649,7 @@ fn run_search_server(
 fn run_search_local(
     config: &Config,
     query: &str,
-    path: &PathBuf,
+    path: &Path,
     max_results: usize,
     show_content: bool,
     interactive: bool,
