@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use console::style;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 
 fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("Could not determine home directory")
@@ -49,14 +48,6 @@ pub fn install_claude_code() -> Result<()> {
         style(">>").cyan()
     );
 
-    let shell = if cfg!(windows) {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
-    } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
-    };
-
-    // Note: Claude Code plugin system - vgrep would need to be published as a plugin
-    // For now, we add vgrep to the Claude Code instructions
     let claude_dir = home_dir()?.join(".claude");
     fs::create_dir_all(&claude_dir)?;
 

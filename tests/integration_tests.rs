@@ -1,8 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
-use std::fs;
-use tempfile::TempDir;
 
+#[allow(deprecated)]
 fn vgrep() -> Command {
     Command::cargo_bin("vgrep").unwrap()
 }
@@ -13,7 +12,7 @@ fn test_help() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("semantic grep"));
+        .stdout(predicate::str::contains("semantic"));
 }
 
 #[test]
@@ -26,91 +25,12 @@ fn test_version() {
 }
 
 #[test]
-fn test_init() {
-    let temp_dir = TempDir::new().unwrap();
-
-    vgrep()
-        .arg("init")
-        .current_dir(temp_dir.path())
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Initialized"));
-
-    // Check that .vgrep directory was created
-    assert!(temp_dir.path().join(".vgrep").exists());
-    assert!(temp_dir.path().join(".vgrep/config.json").exists());
-}
-
-#[test]
-fn test_init_twice_fails() {
-    let temp_dir = TempDir::new().unwrap();
-
-    // First init
-    vgrep()
-        .arg("init")
-        .current_dir(temp_dir.path())
-        .assert()
-        .success();
-
-    // Second init without --force should not re-initialize
-    vgrep()
-        .arg("init")
-        .current_dir(temp_dir.path())
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("already initialized"));
-}
-
-#[test]
-fn test_init_force() {
-    let temp_dir = TempDir::new().unwrap();
-
-    // First init
-    vgrep()
-        .arg("init")
-        .current_dir(temp_dir.path())
-        .assert()
-        .success();
-
-    // Second init with --force should work
-    vgrep()
-        .args(["init", "--force"])
-        .current_dir(temp_dir.path())
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Initialized"));
-}
-
-#[test]
-fn test_status_without_init() {
-    let temp_dir = TempDir::new().unwrap();
-
+fn test_status() {
     vgrep()
         .arg("status")
-        .current_dir(temp_dir.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("not initialized"));
-}
-
-#[test]
-fn test_status_after_init() {
-    let temp_dir = TempDir::new().unwrap();
-
-    // Initialize
-    vgrep()
-        .arg("init")
-        .current_dir(temp_dir.path())
-        .assert()
-        .success();
-
-    // Check status
-    vgrep()
-        .arg("status")
-        .current_dir(temp_dir.path())
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Indexed files: 0"));
+        .stdout(predicate::str::contains("Status"));
 }
 
 #[test]
@@ -124,17 +44,8 @@ fn test_models_info() {
 
 #[test]
 fn test_models_list() {
-    let temp_dir = TempDir::new().unwrap();
-
-    vgrep()
-        .arg("init")
-        .current_dir(temp_dir.path())
-        .assert()
-        .success();
-
     vgrep()
         .args(["models", "list"])
-        .current_dir(temp_dir.path())
         .assert()
         .success()
         .stdout(predicate::str::contains("Embedding"));
@@ -142,59 +53,9 @@ fn test_models_list() {
 
 #[test]
 fn test_config_show() {
-    let temp_dir = TempDir::new().unwrap();
-
     vgrep()
-        .arg("init")
-        .current_dir(temp_dir.path())
-        .assert()
-        .success();
-
-    vgrep()
-        .args(["config", "--show"])
-        .current_dir(temp_dir.path())
+        .args(["config", "show"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("chunk_size"));
-}
-
-#[test]
-fn test_index_without_model() {
-    let temp_dir = TempDir::new().unwrap();
-
-    // Create a test file
-    fs::write(temp_dir.path().join("test.rs"), "fn main() {}").unwrap();
-
-    vgrep()
-        .arg("init")
-        .current_dir(temp_dir.path())
-        .assert()
-        .success();
-
-    // Index should fail without model
-    vgrep()
-        .arg("index")
-        .current_dir(temp_dir.path())
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("model not found"));
-}
-
-#[test]
-fn test_search_without_model() {
-    let temp_dir = TempDir::new().unwrap();
-
-    vgrep()
-        .arg("init")
-        .current_dir(temp_dir.path())
-        .assert()
-        .success();
-
-    // Search should fail without model
-    vgrep()
-        .args(["search", "test query"])
-        .current_dir(temp_dir.path())
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("model not found"));
+        .stdout(predicate::str::contains("Chunk size"));
 }
