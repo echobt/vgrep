@@ -2,7 +2,7 @@
 
 # νgrεp
 
-**Local semantic code search**
+**Search code by meaning, not just keywords. 100% offline. Zero cloud dependencies.**
 
 [![CI](https://github.com/CortexLM/vgrep/actions/workflows/ci.yml/badge.svg)](https://github.com/CortexLM/vgrep/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/CortexLM/vgrep)](https://github.com/CortexLM/vgrep/blob/main/LICENSE)
@@ -17,8 +17,6 @@
  ╚████╔╝ ╚██████╔╝██║  ██║███████╗██║     
   ╚═══╝   ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝     
 </pre>
-
-**Search code by meaning, not just keywords. 100% offline. Zero cloud dependencies.**
 
 </div>
 
