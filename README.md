@@ -1,14 +1,6 @@
 <div align="center">
 
 # νgrεp
-
-**Search code by meaning, not just keywords. 100% offline. Zero cloud dependencies.**
-
-[![CI](https://github.com/CortexLM/vgrep/actions/workflows/ci.yml/badge.svg)](https://github.com/CortexLM/vgrep/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/CortexLM/vgrep)](https://github.com/CortexLM/vgrep/blob/main/LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/CortexLM/vgrep)](https://github.com/CortexLM/vgrep/stargazers)
-[![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org/)
-
 <pre>
 ██╗   ██╗ ██████╗ ██████╗ ███████╗██████╗ 
 ██║   ██║██╔════╝ ██╔══██╗██╔════╝██╔══██╗
@@ -17,6 +9,13 @@
  ╚████╔╝ ╚██████╔╝██║  ██║███████╗██║     
   ╚═══╝   ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝     
 </pre>
+**Search code by meaning, not just keywords. 100% offline. Zero cloud dependencies.**
+
+[![CI](https://github.com/CortexLM/vgrep/actions/workflows/ci.yml/badge.svg)](https://github.com/CortexLM/vgrep/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/CortexLM/vgrep)](https://github.com/CortexLM/vgrep/blob/main/LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/CortexLM/vgrep)](https://github.com/CortexLM/vgrep/stargazers)
+[![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org/)
+
 
 </div>
 
