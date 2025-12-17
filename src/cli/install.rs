@@ -44,7 +44,10 @@ search, grep, semantic, code search, local search, embeddings, llm
 "#;
 
 pub fn install_claude_code() -> Result<()> {
-    println!("  {} Installing vgrep for Claude Code...", style(">>").cyan());
+    println!(
+        "  {} Installing vgrep for Claude Code...",
+        style(">>").cyan()
+    );
 
     let shell = if cfg!(windows) {
         std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
@@ -68,9 +71,15 @@ pub fn install_claude_code() -> Result<()> {
         content.push_str("\n\n");
         content.push_str(VGREP_SKILL.trim());
         fs::write(&instructions_path, content)?;
-        println!("  {} Added vgrep skill to Claude Code", style("[+]").green());
+        println!(
+            "  {} Added vgrep skill to Claude Code",
+            style("[+]").green()
+        );
     } else {
-        println!("  {} vgrep already configured for Claude Code", style("[=]").yellow());
+        println!(
+            "  {} vgrep already configured for Claude Code",
+            style("[=]").yellow()
+        );
     }
 
     println!();
@@ -78,7 +87,10 @@ pub fn install_claude_code() -> Result<()> {
     println!();
     println!("  Next steps:");
     println!("    1. Start vgrep server: {}", style("vgrep serve").cyan());
-    println!("    2. In another terminal: {}", style("vgrep watch").cyan());
+    println!(
+        "    2. In another terminal: {}",
+        style("vgrep watch").cyan()
+    );
     println!("    3. Claude Code can now use vgrep for semantic search");
     println!();
 
@@ -86,17 +98,25 @@ pub fn install_claude_code() -> Result<()> {
 }
 
 pub fn uninstall_claude_code() -> Result<()> {
-    println!("  {} Uninstalling vgrep from Claude Code...", style(">>").cyan());
+    println!(
+        "  {} Uninstalling vgrep from Claude Code...",
+        style(">>").cyan()
+    );
 
     let instructions_path = home_dir()?.join(".claude").join("CLAUDE.md");
-    
+
     if instructions_path.exists() {
         let content = fs::read_to_string(&instructions_path)?;
-        let updated = content.replace(VGREP_SKILL.trim(), "").replace("\n\n\n", "\n\n");
+        let updated = content
+            .replace(VGREP_SKILL.trim(), "")
+            .replace("\n\n\n", "\n\n");
         fs::write(&instructions_path, updated.trim())?;
         println!("  {} Removed vgrep from Claude Code", style("[-]").green());
     } else {
-        println!("  {} vgrep not installed for Claude Code", style("[=]").yellow());
+        println!(
+            "  {} vgrep not installed for Claude Code",
+            style("[=]").yellow()
+        );
     }
 
     Ok(())
@@ -111,7 +131,7 @@ pub fn install_opencode() -> Result<()> {
     // Create tool definition
     let tool_dir = config_dir.join("tool");
     fs::create_dir_all(&tool_dir)?;
-    
+
     let tool_content = r#"
 import { tool } from "@opencode-ai/plugin"
 
@@ -169,10 +189,13 @@ Usage:
 }
 
 pub fn uninstall_opencode() -> Result<()> {
-    println!("  {} Uninstalling vgrep from OpenCode...", style(">>").cyan());
+    println!(
+        "  {} Uninstalling vgrep from OpenCode...",
+        style(">>").cyan()
+    );
 
     let config_dir = home_dir()?.join(".config").join("opencode");
-    
+
     // Remove tool
     let tool_path = config_dir.join("tool").join("vgrep.ts");
     if tool_path.exists() {
@@ -217,7 +240,10 @@ pub fn install_codex() -> Result<()> {
         fs::write(&agents_path, content)?;
         println!("  {} Added vgrep skill to Codex", style("[+]").green());
     } else {
-        println!("  {} vgrep already configured for Codex", style("[=]").yellow());
+        println!(
+            "  {} vgrep already configured for Codex",
+            style("[=]").yellow()
+        );
     }
 
     println!();
@@ -231,10 +257,12 @@ pub fn uninstall_codex() -> Result<()> {
     println!("  {} Uninstalling vgrep from Codex...", style(">>").cyan());
 
     let agents_path = home_dir()?.join(".codex").join("AGENTS.md");
-    
+
     if agents_path.exists() {
         let content = fs::read_to_string(&agents_path)?;
-        let updated = content.replace(VGREP_SKILL.trim(), "").replace("\n\n\n", "\n\n");
+        let updated = content
+            .replace(VGREP_SKILL.trim(), "")
+            .replace("\n\n\n", "\n\n");
         if updated.trim().is_empty() {
             fs::remove_file(&agents_path)?;
         } else {
@@ -247,7 +275,10 @@ pub fn uninstall_codex() -> Result<()> {
 }
 
 pub fn install_droid() -> Result<()> {
-    println!("  {} Installing vgrep for Factory Droid...", style(">>").cyan());
+    println!(
+        "  {} Installing vgrep for Factory Droid...",
+        style(">>").cyan()
+    );
 
     let factory_dir = home_dir()?.join(".factory");
     if !factory_dir.exists() {
@@ -341,14 +372,18 @@ if __name__ == "__main__":
     let watch_py = hooks_dir.join("vgrep_watch.py");
     let kill_py = hooks_dir.join("vgrep_watch_kill.py");
 
-    let hooks = settings.get_mut("hooks").cloned().unwrap_or(serde_json::json!({}));
+    let hooks = settings
+        .get_mut("hooks")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
     let mut hooks = hooks.as_object().cloned().unwrap_or_default();
 
     // Add SessionStart hook
-    let session_start = hooks.entry("SessionStart".to_string())
+    let session_start = hooks
+        .entry("SessionStart".to_string())
         .or_insert(serde_json::json!([]))
         .as_array_mut();
-    
+
     if let Some(arr) = session_start {
         let hook_entry = serde_json::json!({
             "matcher": "startup|resume",
@@ -364,10 +399,11 @@ if __name__ == "__main__":
     }
 
     // Add SessionEnd hook
-    let session_end = hooks.entry("SessionEnd".to_string())
+    let session_end = hooks
+        .entry("SessionEnd".to_string())
         .or_insert(serde_json::json!([]))
         .as_array_mut();
-    
+
     if let Some(arr) = session_end {
         let hook_entry = serde_json::json!({
             "hooks": [{
@@ -376,7 +412,10 @@ if __name__ == "__main__":
                 "timeout": 10
             }]
         });
-        if !arr.iter().any(|h| h.to_string().contains("vgrep_watch_kill.py")) {
+        if !arr
+            .iter()
+            .any(|h| h.to_string().contains("vgrep_watch_kill.py"))
+        {
             arr.push(hook_entry);
         }
     }
@@ -395,7 +434,10 @@ if __name__ == "__main__":
 }
 
 pub fn uninstall_droid() -> Result<()> {
-    println!("  {} Uninstalling vgrep from Factory Droid...", style(">>").cyan());
+    println!(
+        "  {} Uninstalling vgrep from Factory Droid...",
+        style(">>").cyan()
+    );
 
     let factory_dir = home_dir()?.join(".factory");
 
@@ -425,9 +467,7 @@ pub fn uninstall_droid() -> Result<()> {
                                 arr.retain(|h| !h.to_string().contains("vgrep"));
                             }
                         }
-                        obj.retain(|_, v| {
-                            v.as_array().map(|a| !a.is_empty()).unwrap_or(true)
-                        });
+                        obj.retain(|_, v| v.as_array().map(|a| !a.is_empty()).unwrap_or(true));
                     }
                 }
                 fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
