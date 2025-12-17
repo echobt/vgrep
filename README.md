@@ -15,6 +15,7 @@
 [![License](https://img.shields.io/github/license/CortexLM/vgrep)](https://github.com/CortexLM/vgrep/blob/main/LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/CortexLM/vgrep)](https://github.com/CortexLM/vgrep/stargazers)
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org/)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?logo=discord&logoColor=white)](https://discord.cortex.foundation)
 
 
 </div>
