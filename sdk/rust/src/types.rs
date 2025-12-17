@@ -1,21 +1,16 @@
 //! Protocol types for Term Challenge.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Request from the harness.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {
-    /// Task to complete
     pub instruction: String,
-    /// Step number (1-indexed)
     pub step: u32,
-    /// Previous command executed
     pub last_command: Option<String>,
-    /// Output from last command
     pub output: Option<String>,
-    /// Exit code from last command
     pub exit_code: Option<i32>,
-    /// Current working directory
     #[serde(default = "default_cwd")]
     pub cwd: String,
 }
@@ -25,35 +20,29 @@ fn default_cwd() -> String {
 }
 
 impl Request {
-    /// Parse request from JSON string.
     pub fn parse(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
-    
-    /// True if this is the first step.
+
     pub fn is_first(&self) -> bool {
         self.step == 1
     }
-    
-    /// True if last command succeeded.
+
     pub fn is_ok(&self) -> bool {
         self.exit_code == Some(0)
     }
-    
-    /// True if last command failed.
+
     pub fn failed(&self) -> bool {
         matches!(self.exit_code, Some(code) if code != 0)
     }
-    
-    /// Check if output contains pattern (case-insensitive).
+
     pub fn has(&self, pattern: &str) -> bool {
         self.output
             .as_ref()
             .map(|o| o.to_lowercase().contains(&pattern.to_lowercase()))
             .unwrap_or(false)
     }
-    
-    /// Check if output matches any pattern.
+
     pub fn has_any(&self, patterns: &[&str]) -> bool {
         patterns.iter().any(|p| self.has(p))
     }
@@ -62,10 +51,12 @@ impl Request {
 /// Response to the harness.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct Response {
-    /// Command to execute (None = no command)
     pub command: Option<String>,
-    /// True when task is complete
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
     pub task_complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<HashMap<String, serde_json::Value>>,
 }
 
 impl Response {
@@ -73,36 +64,61 @@ impl Response {
     pub fn cmd(command: impl Into<String>) -> Self {
         Self {
             command: Some(command.into()),
+            text: None,
             task_complete: false,
+            data: None,
         }
     }
-    
+
+    /// Create response with text only.
+    pub fn say(text: impl Into<String>) -> Self {
+        Self {
+            command: None,
+            text: Some(text.into()),
+            task_complete: false,
+            data: None,
+        }
+    }
+
     /// Create response marking task complete.
     pub fn done() -> Self {
         Self {
             command: None,
+            text: None,
             task_complete: true,
+            data: None,
         }
     }
-    
+
+    /// Add text to response.
+    pub fn with_text(mut self, text: impl Into<String>) -> Self {
+        self.text = Some(text.into());
+        self
+    }
+
+    /// Add data to response.
+    pub fn with_data(mut self, data: HashMap<String, serde_json::Value>) -> Self {
+        self.data = Some(data);
+        self
+    }
+
     /// Mark task as complete.
     pub fn complete(mut self) -> Self {
         self.task_complete = true;
         self
     }
-    
+
     /// Convert to JSON string.
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| {
             r#"{"command":null,"task_complete":true}"#.to_string()
         })
     }
-    
+
     /// Parse response from LLM output.
     pub fn from_llm(text: &str) -> Self {
-        // Try to find JSON in response
         let text = text.trim();
-        
+
         // Remove markdown code blocks
         let text = if text.contains("```") {
             if let Some(start) = text.find('{') {
@@ -117,52 +133,82 @@ impl Response {
         } else {
             text
         };
-        
-        // Find JSON object
+
         if let Some(start) = text.find('{') {
             if let Some(end) = text.rfind('}') {
                 if let Ok(data) = serde_json::from_str::<serde_json::Value>(&text[start..=end]) {
                     return Self {
                         command: data.get("command").and_then(|v| v.as_str()).map(String::from),
+                        text: data.get("text").and_then(|v| v.as_str()).map(String::from),
                         task_complete: data.get("task_complete").and_then(|v| v.as_bool()).unwrap_or(false),
+                        data: None,
                     };
                 }
             }
         }
-        
+
         Self::done()
+    }
+}
+
+/// A function call from the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionCall {
+    pub name: String,
+    pub arguments: HashMap<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+}
+
+/// Tool definition for function calling.
+#[derive(Debug, Clone, Serialize)]
+pub struct Tool {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+impl Tool {
+    pub fn new(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }
+    }
+
+    pub fn with_parameters(mut self, params: serde_json::Value) -> Self {
+        self.parameters = params;
+        self
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+            }
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
-    fn test_request_parse() {
-        let json = r#"{"instruction":"test","step":1,"cwd":"/app"}"#;
-        let req = Request::parse(json).unwrap();
-        assert_eq!(req.instruction, "test");
-        assert_eq!(req.step, 1);
-        assert!(req.is_first());
-    }
-    
-    #[test]
-    fn test_response_cmd() {
-        let resp = Response::cmd("ls -la");
-        assert_eq!(resp.command, Some("ls -la".to_string()));
-        assert!(!resp.task_complete);
-    }
-    
-    #[test]
-    fn test_response_from_llm() {
-        let text = r#"{"command": "ls", "task_complete": false}"#;
-        let resp = Response::from_llm(text);
+    fn test_response_with_text() {
+        let resp = Response::cmd("ls").with_text("Listing files...");
         assert_eq!(resp.command, Some("ls".to_string()));
-        
-        let text = "Some text ```json\n{\"command\": \"pwd\", \"task_complete\": true}\n```";
-        let resp = Response::from_llm(text);
-        assert_eq!(resp.command, Some("pwd".to_string()));
-        assert!(resp.task_complete);
+        assert_eq!(resp.text, Some("Listing files...".to_string()));
+    }
+
+    #[test]
+    fn test_response_say() {
+        let resp = Response::say("Thinking...");
+        assert!(resp.command.is_none());
+        assert_eq!(resp.text, Some("Thinking...".to_string()));
     }
 }

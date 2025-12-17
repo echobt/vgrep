@@ -14,10 +14,7 @@
 //!         if req.step == 1 {
 //!             return Response::cmd("ls -la");
 //!         }
-//!         if req.has("hello") {
-//!             return Response::done();
-//!         }
-//!         Response::cmd("echo hello")
+//!         Response::done()
 //!     }
 //! }
 //!
@@ -35,20 +32,9 @@
 //!     llm: LLM,
 //! }
 //!
-//! impl LLMAgent {
-//!     fn new() -> Self {
-//!         Self {
-//!             llm: LLM::new("anthropic/claude-3-haiku"),
-//!         }
-//!     }
-//! }
-//!
 //! impl Agent for LLMAgent {
 //!     fn solve(&mut self, req: &Request) -> Response {
-//!         let prompt = format!(
-//!             "Task: {}\nOutput: {:?}\nReturn JSON: {{\"command\": \"...\", \"task_complete\": false}}",
-//!             req.instruction, req.output
-//!         );
+//!         let prompt = format!("Task: {}\nOutput: {:?}", req.instruction, req.output);
 //!         match self.llm.ask(&prompt) {
 //!             Ok(resp) => Response::from_llm(&resp.text),
 //!             Err(_) => Response::done(),
@@ -57,7 +43,38 @@
 //! }
 //!
 //! fn main() {
-//!     run(&mut LLMAgent::new());
+//!     let mut agent = LLMAgent { llm: LLM::new("claude-3-haiku") };
+//!     run(&mut agent);
+//! }
+//! ```
+//!
+//! ## With Function Calling
+//!
+//! ```rust,no_run
+//! use term_sdk::{Agent, Request, Response, LLM, Tool, run};
+//!
+//! struct ToolAgent {
+//!     llm: LLM,
+//! }
+//!
+//! impl Agent for ToolAgent {
+//!     fn setup(&mut self) {
+//!         self.llm.register_function("search", |args| {
+//!             Ok(format!("Found: {:?}", args.get("query")))
+//!         });
+//!     }
+//!
+//!     fn solve(&mut self, req: &Request) -> Response {
+//!         let tools = vec![Tool::new("search", "Search for files")];
+//!         match self.llm.chat_with_functions(
+//!             &[term_sdk::Message::user(&req.instruction)],
+//!             &tools,
+//!             5,
+//!         ) {
+//!             Ok(resp) => Response::from_llm(&resp.text),
+//!             Err(_) => Response::done(),
+//!         }
+//!     }
 //! }
 //! ```
 
@@ -66,7 +83,7 @@ mod agent;
 mod runner;
 mod llm;
 
-pub use types::{Request, Response};
+pub use types::{Request, Response, Tool, FunctionCall};
 pub use agent::Agent;
 pub use runner::run;
-pub use llm::{LLM, LLMResponse, Provider};
+pub use llm::{LLM, LLMResponse, Message};

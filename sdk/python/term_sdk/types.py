@@ -1,15 +1,12 @@
 """
 Term Challenge Protocol Types.
-
-Request: What the harness sends to your agent
-Response: What your agent sends back
 """
 
 from __future__ import annotations
 import json
 import re
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any
 
 
 @dataclass
@@ -24,19 +21,6 @@ class Request:
         output: Output from last command (None on step 1)
         exit_code: Exit code from last command (None on step 1)
         cwd: Current working directory
-    
-    Example:
-        ```python
-        def solve(self, req: Request) -> Response:
-            if req.step == 1:
-                return Response.cmd("pwd")
-            
-            if req.failed:
-                return Response.cmd("echo 'retry'")
-            
-            if "hello" in req.output:
-                return Response.done()
-        ```
     """
     instruction: str
     step: int
@@ -95,29 +79,52 @@ class Response:
     
     Attributes:
         command: Shell command to execute (None = no command)
+        text: Text output/message to display
         task_complete: True when task is finished
+        data: Additional data to pass back
     
     Example:
-        ```python
         # Execute a command
         Response.cmd("ls -la")
         
-        # Task complete
-        Response.done()
+        # Send text message
+        Response.text("Analyzing the output...")
         
-        # Execute then complete
-        Response.cmd("echo done").complete()
-        ```
+        # Command with text
+        Response.cmd("make build").with_text("Building project...")
+        
+        # Task complete with summary
+        Response.done("Task completed successfully!")
     """
     command: Optional[str] = None
+    text: Optional[str] = None
     task_complete: bool = False
+    data: Optional[Dict[str, Any]] = None
+    
+    def to_dict(self) -> dict:
+        d = {
+            "command": self.command,
+            "task_complete": self.task_complete,
+        }
+        if self.text:
+            d["text"] = self.text
+        if self.data:
+            d["data"] = self.data
+        return d
     
     def to_json(self) -> str:
         """Convert to JSON string."""
-        return json.dumps({
-            "command": self.command,
-            "task_complete": self.task_complete,
-        })
+        return json.dumps(self.to_dict())
+    
+    def with_text(self, text: str) -> Response:
+        """Add text to response."""
+        self.text = text
+        return self
+    
+    def with_data(self, data: Dict[str, Any]) -> Response:
+        """Add data to response."""
+        self.data = data
+        return self
     
     def complete(self) -> Response:
         """Mark task as complete."""
@@ -125,14 +132,19 @@ class Response:
         return self
     
     @classmethod
-    def cmd(cls, command: str) -> Response:
+    def cmd(cls, command: str, text: Optional[str] = None) -> Response:
         """Create response with a command."""
-        return cls(command=command, task_complete=False)
+        return cls(command=command, text=text, task_complete=False)
     
     @classmethod
-    def done(cls) -> Response:
+    def say(cls, text: str) -> Response:
+        """Create response with text only (no command)."""
+        return cls(command=None, text=text, task_complete=False)
+    
+    @classmethod
+    def done(cls, text: Optional[str] = None) -> Response:
         """Create response marking task complete."""
-        return cls(command=None, task_complete=True)
+        return cls(command=None, text=text, task_complete=True)
     
     @classmethod
     def from_llm(cls, text: str) -> Response:
@@ -140,12 +152,7 @@ class Response:
         Parse response from LLM output.
         
         Extracts JSON from LLM response text.
-        Handles common formats:
-        - Raw JSON: {"command": "...", "task_complete": false}
-        - JSON in code block: ```json {...} ```
-        - Text with embedded JSON
         """
-        # Try to find JSON in response
         text = text.strip()
         
         # Remove markdown code blocks
@@ -163,10 +170,53 @@ class Response:
                 data = json.loads(text[start:end + 1])
                 return cls(
                     command=data.get("command"),
+                    text=data.get("text"),
                     task_complete=data.get("task_complete", False),
+                    data=data.get("data"),
                 )
             except json.JSONDecodeError:
                 pass
         
-        # Fallback: no valid JSON found
         return cls.done()
+
+
+@dataclass
+class FunctionCall:
+    """A function call from the LLM."""
+    name: str
+    arguments: Dict[str, Any]
+    id: Optional[str] = None
+
+
+@dataclass
+class Tool:
+    """
+    Tool/function definition for LLM.
+    
+    Example:
+        tool = Tool(
+            name="search_files",
+            description="Search for files matching a pattern",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Glob pattern"},
+                    "directory": {"type": "string", "description": "Directory to search"}
+                },
+                "required": ["pattern"]
+            }
+        )
+    """
+    name: str
+    description: str
+    parameters: Dict[str, Any] = field(default_factory=dict)
+    
+    def to_dict(self) -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+            }
+        }

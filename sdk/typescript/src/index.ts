@@ -10,8 +10,7 @@
  * class MyAgent implements Agent {
  *   solve(req: Request): Response {
  *     if (req.step === 1) return Response.cmd("ls -la");
- *     if (req.has("hello")) return Response.done();
- *     return Response.cmd("echo hello");
+ *     return Response.done();
  *   }
  * }
  * 
@@ -23,7 +22,7 @@
  * import { Agent, Request, Response, LLM, run } from 'term-sdk';
  * 
  * class LLMAgent implements Agent {
- *   private llm = new LLM({ model: "anthropic/claude-3-haiku" });
+ *   private llm = new LLM({ model: "claude-3-haiku" });
  * 
  *   async solve(req: Request): Promise<Response> {
  *     const result = await this.llm.ask(`Task: ${req.instruction}`);
@@ -33,17 +32,34 @@
  * 
  * run(new LLMAgent());
  * ```
+ * 
+ * @example With Function Calling
+ * ```typescript
+ * import { Agent, Request, Response, LLM, Tool, run } from 'term-sdk';
+ * 
+ * class ToolAgent implements Agent {
+ *   private llm = new LLM({ model: "claude-3-haiku" });
+ * 
+ *   setup() {
+ *     this.llm.registerFunction("search", (args) => `Found: ${args.query}`);
+ *   }
+ * 
+ *   async solve(req: Request): Promise<Response> {
+ *     const tools = [new Tool("search", "Search for files", { ... })];
+ *     const result = await this.llm.chatWithFunctions(
+ *       [{ role: "user", content: req.instruction }],
+ *       tools
+ *     );
+ *     return Response.fromLLM(result.text);
+ *   }
+ * }
+ * ```
  */
-
-import * as readline from 'readline';
 
 // ============================================================================
 // Types
 // ============================================================================
 
-/**
- * Request from the harness.
- */
 export interface RequestData {
   instruction: string;
   step: number;
@@ -53,9 +69,6 @@ export interface RequestData {
   cwd: string;
 }
 
-/**
- * Request wrapper with helper methods.
- */
 export class Request {
   readonly instruction: string;
   readonly step: number;
@@ -77,22 +90,10 @@ export class Request {
     return new Request(JSON.parse(json));
   }
 
-  /** True if this is the first step */
-  get first(): boolean {
-    return this.step === 1;
-  }
+  get first(): boolean { return this.step === 1; }
+  get ok(): boolean { return this.exitCode === 0; }
+  get failed(): boolean { return this.exitCode !== null && this.exitCode !== 0; }
 
-  /** True if last command succeeded */
-  get ok(): boolean {
-    return this.exitCode === 0;
-  }
-
-  /** True if last command failed */
-  get failed(): boolean {
-    return this.exitCode !== null && this.exitCode !== 0;
-  }
-
-  /** Check if output contains any pattern (case-insensitive) */
   has(...patterns: string[]): boolean {
     if (!this.output) return false;
     const lower = this.output.toLowerCase();
@@ -100,53 +101,66 @@ export class Request {
   }
 }
 
-/**
- * Response to the harness.
- */
 export class Response {
   command: string | null;
+  text: string | null;
   taskComplete: boolean;
+  data: Record<string, any> | null;
 
-  constructor(command: string | null = null, taskComplete = false) {
+  constructor(
+    command: string | null = null,
+    text: string | null = null,
+    taskComplete = false,
+    data: Record<string, any> | null = null
+  ) {
     this.command = command;
+    this.text = text;
     this.taskComplete = taskComplete;
+    this.data = data;
   }
 
-  /** Create response with command */
-  static cmd(command: string): Response {
-    return new Response(command, false);
+  static cmd(command: string, text?: string): Response {
+    return new Response(command, text ?? null, false);
   }
 
-  /** Create response marking task complete */
-  static done(): Response {
-    return new Response(null, true);
+  static say(text: string): Response {
+    return new Response(null, text, false);
   }
 
-  /** Mark task as complete */
+  static done(text?: string): Response {
+    return new Response(null, text ?? null, true);
+  }
+
+  withText(text: string): Response {
+    this.text = text;
+    return this;
+  }
+
+  withData(data: Record<string, any>): Response {
+    this.data = data;
+    return this;
+  }
+
   complete(): Response {
     this.taskComplete = true;
     return this;
   }
 
-  /** Convert to JSON string */
   toJSON(): string {
-    return JSON.stringify({
+    const obj: any = {
       command: this.command,
       task_complete: this.taskComplete,
-    });
+    };
+    if (this.text) obj.text = this.text;
+    if (this.data) obj.data = this.data;
+    return JSON.stringify(obj);
   }
 
-  /** Parse response from LLM output */
   static fromLLM(text: string): Response {
     text = text.trim();
-
-    // Remove markdown code blocks
     const codeMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-    if (codeMatch) {
-      text = codeMatch[1];
-    }
+    if (codeMatch) text = codeMatch[1];
 
-    // Find JSON object
     const start = text.indexOf('{');
     const end = text.lastIndexOf('}');
 
@@ -155,14 +169,46 @@ export class Response {
         const data = JSON.parse(text.slice(start, end + 1));
         return new Response(
           data.command ?? null,
-          data.task_complete ?? false
+          data.text ?? null,
+          data.task_complete ?? false,
+          data.data ?? null
         );
-      } catch {
-        // Invalid JSON
-      }
+      } catch { }
     }
-
     return Response.done();
+  }
+}
+
+// ============================================================================
+// Function Calling
+// ============================================================================
+
+export interface FunctionCall {
+  name: string;
+  arguments: Record<string, any>;
+  id?: string;
+}
+
+export class Tool {
+  name: string;
+  description: string;
+  parameters: Record<string, any>;
+
+  constructor(name: string, description: string, parameters: Record<string, any> = {}) {
+    this.name = name;
+    this.description = description;
+    this.parameters = parameters;
+  }
+
+  toJSON(): any {
+    return {
+      type: "function",
+      function: {
+        name: this.name,
+        description: this.description,
+        parameters: this.parameters,
+      }
+    };
   }
 }
 
@@ -170,17 +216,9 @@ export class Response {
 // Agent
 // ============================================================================
 
-/**
- * Agent interface.
- */
 export interface Agent {
-  /** Initialize (optional) */
   setup?(): void | Promise<void>;
-  
-  /** Process request and return response */
   solve(request: Request): Response | Promise<Response>;
-  
-  /** Cleanup (optional) */
   cleanup?(): void | Promise<void>;
 }
 
@@ -192,17 +230,10 @@ function log(msg: string): void {
   console.error(`[agent] ${msg}`);
 }
 
-/**
- * Run an agent in the Term Challenge harness.
- */
 export async function run(agent: Agent): Promise<void> {
   try {
-    // Setup
-    if (agent.setup) {
-      await agent.setup();
-    }
+    if (agent.setup) await agent.setup();
 
-    // Read input
     const input = await readStdin();
     if (!input) {
       log("No input received");
@@ -210,7 +241,6 @@ export async function run(agent: Agent): Promise<void> {
       return;
     }
 
-    // Parse request
     let request: Request;
     try {
       request = Request.parse(input);
@@ -221,17 +251,10 @@ export async function run(agent: Agent): Promise<void> {
     }
 
     log(`Step ${request.step}: ${request.instruction.slice(0, 50)}...`);
-
-    // Solve
     const response = await agent.solve(request);
-
-    // Output
     console.log(response.toJSON());
 
-    // Cleanup
-    if (agent.cleanup) {
-      await agent.cleanup();
-    }
+    if (agent.cleanup) await agent.cleanup();
   } catch (e) {
     log(`Error: ${e}`);
     console.log(Response.done().toJSON());
@@ -244,11 +267,7 @@ async function readStdin(): Promise<string> {
     process.stdin.setEncoding('utf8');
     process.stdin.on('data', (chunk) => { data += chunk; });
     process.stdin.on('end', () => resolve(data.trim()));
-    
-    // Handle no input
-    setTimeout(() => {
-      if (!data) resolve('');
-    }, 100);
+    setTimeout(() => { if (!data) resolve(''); }, 100);
   });
 }
 
@@ -256,12 +275,8 @@ async function readStdin(): Promise<string> {
 // LLM Client
 // ============================================================================
 
-export type Provider = 'openrouter' | 'openai' | 'anthropic';
-
 export interface LLMOptions {
-  provider?: Provider;
   model?: string;
-  apiKey?: string;
   temperature?: number;
   maxTokens?: number;
   timeout?: number;
@@ -273,110 +288,78 @@ export interface LLMResponse {
   tokens: number;
   cost: number;
   latencyMs: number;
+  functionCalls: FunctionCall[];
+  raw?: any;
 }
 
 export interface Message {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string | null;
+  tool_calls?: any[];
+  tool_call_id?: string;
 }
 
-const PROVIDER_CONFIG = {
-  openrouter: {
-    url: 'https://openrouter.ai/api/v1/chat/completions',
-    envKey: 'OPENROUTER_API_KEY',
-  },
-  openai: {
-    url: 'https://api.openai.com/v1/chat/completions',
-    envKey: 'OPENAI_API_KEY',
-  },
-  anthropic: {
-    url: 'https://api.anthropic.com/v1/messages',
-    envKey: 'ANTHROPIC_API_KEY',
-  },
-};
+type FunctionHandler = (args: Record<string, any>) => any | Promise<any>;
 
-const PRICING: Record<string, [number, number]> = {
-  'anthropic/claude-3-haiku': [0.25, 1.25],
-  'anthropic/claude-3-sonnet': [3.0, 15.0],
-  'anthropic/claude-3-opus': [15.0, 75.0],
-  'openai/gpt-4o': [5.0, 15.0],
-  'openai/gpt-4o-mini': [0.15, 0.6],
-  'gpt-4o': [5.0, 15.0],
-  'gpt-4o-mini': [0.15, 0.6],
-};
-
-/**
- * LLM client for multiple providers.
- */
 export class LLM {
-  private provider: Provider;
   private model: string;
-  private apiKey: string;
   private temperature: number;
   private maxTokens: number;
   private timeout: number;
+  private apiUrl: string;
+  private apiKey: string;
+  private functionHandlers: Map<string, FunctionHandler> = new Map();
 
   totalTokens = 0;
   totalCost = 0;
   requestCount = 0;
 
   constructor(options: LLMOptions = {}) {
-    this.provider = options.provider || 'openrouter';
-    this.model = options.model || 'anthropic/claude-3-haiku';
+    this.model = options.model || 'claude-3-haiku';
     this.temperature = options.temperature ?? 0.3;
-    this.maxTokens = options.maxTokens ?? 1024;
-    this.timeout = options.timeout ?? 60000;
+    this.maxTokens = options.maxTokens ?? 4096;
+    this.timeout = options.timeout ?? 120000;
+    this.apiUrl = process.env.LLM_API_URL || 'https://openrouter.ai/api/v1/chat/completions';
+    this.apiKey = process.env.LLM_API_KEY || process.env.OPENROUTER_API_KEY || '';
 
-    const config = PROVIDER_CONFIG[this.provider];
-    this.apiKey = options.apiKey || process.env[config.envKey] || '';
-    
     if (!this.apiKey) {
-      console.error(`[llm] Warning: ${config.envKey} not set`);
+      console.error('[llm] Warning: LLM_API_KEY or OPENROUTER_API_KEY not set');
     }
   }
 
-  /** Ask a simple question */
-  async ask(prompt: string, system?: string): Promise<LLMResponse> {
+  registerFunction(name: string, handler: FunctionHandler): void {
+    this.functionHandlers.set(name, handler);
+  }
+
+  async ask(prompt: string, system?: string, tools?: Tool[]): Promise<LLMResponse> {
     const messages: Message[] = [];
     if (system) messages.push({ role: 'system', content: system });
     messages.push({ role: 'user', content: prompt });
-    return this.chat(messages);
+    return this.chat(messages, tools);
   }
 
-  /** Chat with messages */
-  async chat(messages: Message[]): Promise<LLMResponse> {
+  async chat(messages: Message[], tools?: Tool[]): Promise<LLMResponse> {
     const start = Date.now();
 
-    const response = this.provider === 'anthropic'
-      ? await this.chatAnthropic(messages)
-      : await this.chatOpenAI(messages);
+    const payload: any = {
+      model: this.model,
+      messages,
+      temperature: this.temperature,
+      max_tokens: this.maxTokens,
+    };
 
-    response.latencyMs = Date.now() - start;
+    if (tools && tools.length > 0) {
+      payload.tools = tools.map(t => t.toJSON());
+      payload.tool_choice = "auto";
+    }
 
-    this.totalTokens += response.tokens;
-    this.totalCost += response.cost;
-    this.requestCount++;
-
-    console.error(`[llm] ${response.model}: ${response.tokens} tokens, $${response.cost.toFixed(4)}, ${response.latencyMs}ms`);
-
-    return response;
-  }
-
-  private async chatOpenAI(messages: Message[]): Promise<LLMResponse> {
-    const config = PROVIDER_CONFIG[this.provider];
-
-    const response = await fetch(config.url, {
+    const response = await fetch(this.apiUrl, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${this.apiKey}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model: this.model,
-        messages,
-        temperature: this.temperature,
-        max_tokens: this.maxTokens,
-      }),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(this.timeout),
     });
 
@@ -385,70 +368,106 @@ export class LLM {
     }
 
     const data = await response.json() as any;
-    const text = data.choices?.[0]?.message?.content || '';
+    const choice = data.choices?.[0] || {};
+    const message = choice.message || {};
+
+    const text = message.content || '';
+    const functionCalls: FunctionCall[] = [];
+
+    for (const tc of message.tool_calls || []) {
+      if (tc.type === 'function') {
+        let args = {};
+        try { args = JSON.parse(tc.function?.arguments || '{}'); } catch { }
+        functionCalls.push({
+          name: tc.function?.name || '',
+          arguments: args,
+          id: tc.id,
+        });
+      }
+    }
+
     const promptTokens = data.usage?.prompt_tokens || 0;
     const completionTokens = data.usage?.completion_tokens || 0;
+    const tokens = promptTokens + completionTokens;
+    const cost = this.calculateCost(promptTokens, completionTokens);
+    const latencyMs = Date.now() - start;
 
-    return {
-      text,
-      model: this.model,
-      tokens: promptTokens + completionTokens,
-      cost: this.calculateCost(promptTokens, completionTokens),
-      latencyMs: 0,
-    };
+    this.totalTokens += tokens;
+    this.totalCost += cost;
+    this.requestCount++;
+
+    console.error(`[llm] ${this.model}: ${tokens} tokens, $${cost.toFixed(4)}, ${latencyMs}ms`);
+
+    return { text, model: this.model, tokens, cost, latencyMs, functionCalls, raw: data };
   }
 
-  private async chatAnthropic(messages: Message[]): Promise<LLMResponse> {
-    const config = PROVIDER_CONFIG.anthropic;
+  async executeFunction(call: FunctionCall): Promise<any> {
+    const handler = this.functionHandlers.get(call.name);
+    if (!handler) throw new Error(`Unknown function: ${call.name}`);
+    return handler(call.arguments);
+  }
 
-    let system: string | undefined;
-    const userMessages = messages.filter(m => {
-      if (m.role === 'system') {
-        system = m.content;
-        return false;
+  async chatWithFunctions(
+    messages: Message[],
+    tools: Tool[],
+    maxIterations = 10
+  ): Promise<LLMResponse> {
+    const msgs = [...messages];
+
+    for (let i = 0; i < maxIterations; i++) {
+      const response = await this.chat(msgs, tools);
+
+      if (response.functionCalls.length === 0) {
+        return response;
       }
-      return true;
-    });
 
-    const body: any = {
-      model: this.model,
-      messages: userMessages,
-      temperature: this.temperature,
-      max_tokens: this.maxTokens,
-    };
-    if (system) body.system = system;
-
-    const response = await fetch(config.url, {
-      method: 'POST',
-      headers: {
-        'x-api-key': this.apiKey,
-        'Content-Type': 'application/json',
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.timeout),
-    });
-
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
+      for (const call of response.functionCalls) {
+        try {
+          const result = await this.executeFunction(call);
+          msgs.push({
+            role: 'assistant',
+            content: null,
+            tool_calls: [{
+              id: call.id,
+              type: 'function',
+              function: { name: call.name, arguments: JSON.stringify(call.arguments) }
+            }]
+          });
+          msgs.push({
+            role: 'tool',
+            tool_call_id: call.id,
+            content: typeof result === 'string' ? result : JSON.stringify(result),
+          });
+        } catch (e) {
+          msgs.push({
+            role: 'tool',
+            tool_call_id: call.id,
+            content: `Error: ${e}`,
+          });
+        }
+      }
     }
 
-    const data = await response.json() as any;
-    const text = data.content?.[0]?.text || '';
-    const promptTokens = data.usage?.input_tokens || 0;
-    const completionTokens = data.usage?.output_tokens || 0;
-
-    return {
-      text,
-      model: this.model,
-      tokens: promptTokens + completionTokens,
-      cost: this.calculateCost(promptTokens, completionTokens),
-      latencyMs: 0,
-    };
+    return this.chat(msgs, tools);
   }
 
   private calculateCost(promptTokens: number, completionTokens: number): number {
-    const [inputPrice, outputPrice] = PRICING[this.model] || [0.5, 1.5];
+    const pricing: Record<string, [number, number]> = {
+      'claude-3-haiku': [0.25, 1.25],
+      'claude-3-sonnet': [3.0, 15.0],
+      'claude-3-opus': [15.0, 75.0],
+      'gpt-4o': [5.0, 15.0],
+      'gpt-4o-mini': [0.15, 0.6],
+    };
+
+    let [inputPrice, outputPrice] = [0.5, 1.5];
+    for (const [key, prices] of Object.entries(pricing)) {
+      if (this.model.toLowerCase().includes(key)) {
+        [inputPrice, outputPrice] = prices;
+        break;
+      }
+    }
+
     return (promptTokens * inputPrice + completionTokens * outputPrice) / 1_000_000;
   }
 }

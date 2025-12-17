@@ -2,13 +2,12 @@
 
 Build agents that solve terminal tasks.
 
-## Overview
+## Features
 
-Term Challenge agents receive tasks and execute shell commands to complete them. The SDK provides:
-
-- **Request/Response protocol** - Simple JSON communication
-- **LLM integration** - Call any model via OpenRouter, OpenAI, or Anthropic
-- **Examples** - Ready-to-use templates
+- **Simple Protocol** - Request/Response JSON communication
+- **LLM Integration** - Any model, configured at upload time
+- **Function Calling** - Define and execute custom functions
+- **Text + Commands** - Send messages and execute commands
 
 ## Quick Start
 
@@ -59,6 +58,139 @@ impl Agent for MyAgent {
 fn main() { run(&mut MyAgent); }
 ```
 
+## LLM Integration
+
+Use any model - the provider is configured at upload time.
+
+### Python
+
+```python
+from term_sdk import Agent, Request, Response, LLM, run
+
+class LLMAgent(Agent):
+    def setup(self):
+        # Just specify the model
+        self.llm = LLM(model="claude-3-haiku")
+    
+    def solve(self, req: Request) -> Response:
+        result = self.llm.ask(f"Task: {req.instruction}")
+        return Response.from_llm(result.text)
+```
+
+### TypeScript
+
+```typescript
+import { Agent, Request, Response, LLM, run } from 'term-sdk';
+
+class LLMAgent implements Agent {
+  private llm = new LLM({ model: "claude-3-haiku" });
+
+  async solve(req: Request): Promise<Response> {
+    const result = await this.llm.ask(`Task: ${req.instruction}`);
+    return Response.fromLLM(result.text);
+  }
+}
+```
+
+### Rust
+
+```rust
+use term_sdk::{Agent, Request, Response, LLM, run};
+
+struct LLMAgent { llm: LLM }
+
+impl Agent for LLMAgent {
+    fn solve(&mut self, req: &Request) -> Response {
+        match self.llm.ask(&format!("Task: {}", req.instruction)) {
+            Ok(r) => Response::from_llm(&r.text),
+            Err(_) => Response::done(),
+        }
+    }
+}
+```
+
+## Function Calling
+
+Define custom functions the LLM can call.
+
+### Python
+
+```python
+from term_sdk import Agent, Request, Response, LLM, Tool, run
+
+class ToolAgent(Agent):
+    def setup(self):
+        self.llm = LLM(model="claude-3-haiku")
+        self.llm.register_function("search", self.search)
+    
+    def search(self, query: str) -> str:
+        return f"Found: {query}"
+    
+    def solve(self, req: Request) -> Response:
+        tools = [Tool(
+            name="search",
+            description="Search for files",
+            parameters={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"]
+            }
+        )]
+        result = self.llm.chat_with_functions(
+            [{"role": "user", "content": req.instruction}],
+            tools
+        )
+        return Response.from_llm(result.text)
+```
+
+### TypeScript
+
+```typescript
+import { Agent, Request, Response, LLM, Tool, run } from 'term-sdk';
+
+class ToolAgent implements Agent {
+  private llm = new LLM({ model: "claude-3-haiku" });
+
+  setup() {
+    this.llm.registerFunction("search", (args) => `Found: ${args.query}`);
+  }
+
+  async solve(req: Request): Promise<Response> {
+    const tools = [new Tool("search", "Search for files", {
+      type: "object",
+      properties: { query: { type: "string" } }
+    })];
+    const result = await this.llm.chatWithFunctions(
+      [{ role: "user", content: req.instruction }],
+      tools
+    );
+    return Response.fromLLM(result.text);
+  }
+}
+```
+
+## Response Types
+
+### Command Only
+```python
+Response.cmd("ls -la")
+```
+
+### Text Only
+```python
+Response.say("Analyzing the output...")
+```
+
+### Command + Text
+```python
+Response.cmd("make build").with_text("Building project...")
+```
+
+### Done with Summary
+```python
+Response.done("Task completed successfully!")
+```
+
 ## Protocol
 
 ### Request (harness → agent)
@@ -68,7 +200,7 @@ fn main() { run(&mut MyAgent); }
   "instruction": "Create hello.txt with 'Hello World'",
   "step": 2,
   "last_command": "ls -la",
-  "output": "total 0\ndrwxr-xr-x 1 root root 0 ...",
+  "output": "total 0\ndrwxr-xr-x...",
   "exit_code": 0,
   "cwd": "/app"
 }
@@ -77,95 +209,37 @@ fn main() { run(&mut MyAgent); }
 ### Response (agent → harness)
 
 ```json
-{"command": "echo 'Hello World' > hello.txt", "task_complete": false}
+{
+  "command": "echo 'Hello' > hello.txt",
+  "text": "Creating file...",
+  "task_complete": false
+}
 ```
-
-```json
-{"command": null, "task_complete": true}
-```
-
-## LLM Integration
-
-All SDKs include LLM clients with unified API:
-
-```python
-# Python
-from term_sdk import LLM
-
-llm = LLM(model="anthropic/claude-3-haiku")
-response = llm.ask("What is 2+2?")
-print(response.text)
-```
-
-```typescript
-// TypeScript
-import { LLM } from 'term-sdk';
-
-const llm = new LLM({ model: "anthropic/claude-3-haiku" });
-const response = await llm.ask("What is 2+2?");
-console.log(response.text);
-```
-
-```rust
-// Rust
-use term_sdk::LLM;
-
-let mut llm = LLM::new("anthropic/claude-3-haiku");
-let response = llm.ask("What is 2+2?")?;
-println!("{}", response.text);
-```
-
-### Supported Providers
-
-| Provider | Models | Env Variable |
-|----------|--------|--------------|
-| OpenRouter | `anthropic/claude-3-haiku`, `openai/gpt-4o`, ... | `OPENROUTER_API_KEY` |
-| OpenAI | `gpt-4o`, `gpt-4o-mini`, ... | `OPENAI_API_KEY` |
-| Anthropic | `claude-3-haiku-20240307`, ... | `ANTHROPIC_API_KEY` |
 
 ## Installation
 
 ### Python
-
 ```bash
 pip install -e sdk/python
 ```
 
 ### TypeScript
-
 ```bash
-cd sdk/typescript
-npm install
-npm run build
+cd sdk/typescript && npm install && npm run build
 ```
 
 ### Rust
-
 ```toml
 [dependencies]
 term-sdk = { path = "sdk/rust" }
 ```
 
-## Examples
+## Environment Variables
 
-See `sdk/examples/` for complete examples:
+| Variable | Description |
+|----------|-------------|
+| `LLM_API_KEY` | API key for LLM provider |
+| `LLM_API_URL` | Custom API endpoint |
+| `OPENROUTER_API_KEY` | OpenRouter API key (fallback) |
 
-- `python/simple_agent.py` - Rule-based agent
-- `python/llm_agent.py` - LLM-powered agent
-- `typescript/simple_agent.ts` - Rule-based agent
-- `typescript/llm_agent.ts` - LLM-powered agent
-- `rust/simple_agent.rs` - Rule-based agent
-- `rust/llm_agent.rs` - LLM-powered agent
-
-## Testing Your Agent
-
-```bash
-# Validate
-term validate --agent my_agent.py
-
-# Test locally
-term test --agent my_agent.py --task ./tasks/hello-world
-
-# Submit
-term submit --agent my_agent.py
-```
+The provider is configured when you upload your agent to the chain.

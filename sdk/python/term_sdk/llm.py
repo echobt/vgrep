@@ -1,33 +1,32 @@
 """
 LLM Client for Term Challenge agents.
 
-Supports multiple providers:
-- OpenRouter (default): anthropic/claude-3-haiku, openai/gpt-4o, etc.
-- OpenAI: gpt-4o, gpt-4o-mini, gpt-3.5-turbo
-- Anthropic: claude-3-opus, claude-3-sonnet, claude-3-haiku
+The provider is configured at upload time. In your agent code,
+just specify the model you want to use.
 
 Example:
     ```python
     from term_sdk import LLM
     
-    # OpenRouter (default)
-    llm = LLM(model="anthropic/claude-3-haiku")
+    # Just specify the model - provider is configured at upload
+    llm = LLM(model="claude-3-haiku")
     
-    # Direct OpenAI
-    llm = LLM(provider="openai", model="gpt-4o")
-    
-    # Direct Anthropic
-    llm = LLM(provider="anthropic", model="claude-3-haiku-20240307")
-    
-    # Ask a question
+    # Simple question
     response = llm.ask("What is 2+2?")
     print(response.text)
     
-    # Chat with messages
-    response = llm.chat([
-        {"role": "system", "content": "You are helpful."},
-        {"role": "user", "content": "Hello!"}
-    ])
+    # With function calling
+    tools = [
+        Tool(
+            name="search",
+            description="Search for files",
+            parameters={"type": "object", "properties": {"query": {"type": "string"}}}
+        )
+    ]
+    response = llm.ask("Find Python files", tools=tools)
+    if response.function_calls:
+        for call in response.function_calls:
+            print(f"Call {call.name} with {call.arguments}")
     ```
 """
 
@@ -35,9 +34,11 @@ import os
 import sys
 import json
 import time
-from dataclasses import dataclass
-from typing import Optional, List, Dict, Any
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any, Callable
 import httpx
+
+from .types import Tool, FunctionCall
 
 
 @dataclass
@@ -48,12 +49,13 @@ class LLMResponse:
     tokens: int = 0
     cost: float = 0.0
     latency_ms: int = 0
+    function_calls: List[FunctionCall] = field(default_factory=list)
+    raw: Optional[Dict[str, Any]] = None
     
     def json(self) -> Optional[Dict]:
-        """Parse response as JSON."""
+        """Parse response text as JSON."""
         try:
             text = self.text.strip()
-            # Remove markdown code blocks
             if "```" in text:
                 import re
                 match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
@@ -66,58 +68,10 @@ class LLMResponse:
         except:
             pass
         return None
-
-
-# Provider configurations
-PROVIDERS = {
-    "openrouter": {
-        "url": "https://openrouter.ai/api/v1/chat/completions",
-        "key_env": "OPENROUTER_API_KEY",
-        "headers": lambda key: {
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        }
-    },
-    "openai": {
-        "url": "https://api.openai.com/v1/chat/completions",
-        "key_env": "OPENAI_API_KEY",
-        "headers": lambda key: {
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        }
-    },
-    "anthropic": {
-        "url": "https://api.anthropic.com/v1/messages",
-        "key_env": "ANTHROPIC_API_KEY",
-        "headers": lambda key: {
-            "x-api-key": key,
-            "Content-Type": "application/json",
-            "anthropic-version": "2023-06-01",
-        }
-    },
-}
-
-# Model pricing (per 1M tokens) - input/output
-PRICING = {
-    # OpenRouter models
-    "anthropic/claude-3-haiku": (0.25, 1.25),
-    "anthropic/claude-3-sonnet": (3.0, 15.0),
-    "anthropic/claude-3-opus": (15.0, 75.0),
-    "anthropic/claude-3.5-sonnet": (3.0, 15.0),
-    "openai/gpt-4o": (5.0, 15.0),
-    "openai/gpt-4o-mini": (0.15, 0.6),
-    "openai/gpt-3.5-turbo": (0.5, 1.5),
-    "google/gemini-pro": (0.5, 1.5),
-    "meta-llama/llama-3-70b": (0.8, 0.8),
-    # Direct OpenAI
-    "gpt-4o": (5.0, 15.0),
-    "gpt-4o-mini": (0.15, 0.6),
-    "gpt-3.5-turbo": (0.5, 1.5),
-    # Direct Anthropic
-    "claude-3-haiku-20240307": (0.25, 1.25),
-    "claude-3-sonnet-20240229": (3.0, 15.0),
-    "claude-3-opus-20240229": (15.0, 75.0),
-}
+    
+    def has_function_calls(self) -> bool:
+        """Check if response has function calls."""
+        return len(self.function_calls) > 0
 
 
 def _log(msg: str):
@@ -126,64 +80,60 @@ def _log(msg: str):
 
 class LLM:
     """
-    LLM client for multiple providers.
+    LLM client for inference.
+    
+    The provider is determined at runtime based on environment configuration.
+    Just specify the model you want to use.
     
     Args:
-        provider: "openrouter" (default), "openai", or "anthropic"
-        model: Model name (e.g., "anthropic/claude-3-haiku")
-        api_key: API key (or set via environment variable)
+        model: Model name (e.g., "claude-3-haiku", "gpt-4o")
         temperature: Sampling temperature (0.0 - 2.0)
         max_tokens: Maximum response tokens
         timeout: Request timeout in seconds
     
     Example:
         ```python
-        llm = LLM(model="anthropic/claude-3-haiku")
+        llm = LLM(model="claude-3-haiku")
         
         # Simple question
         response = llm.ask("What is Python?")
         print(response.text)
         
         # With system prompt
+        response = llm.ask("Write hello world", system="You are a Python expert.")
+        
+        # With function calling
         response = llm.ask(
-            "Write hello world",
-            system="You are a Python expert."
+            "What's the weather?",
+            tools=[Tool(name="get_weather", description="Get weather", parameters={})]
         )
         
         # Chat with history
         response = llm.chat([
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "Hello!"},
-            {"role": "assistant", "content": "Hi there!"},
-            {"role": "user", "content": "How are you?"}
         ])
         ```
     """
     
     def __init__(
         self,
-        provider: str = "openrouter",
-        model: str = "anthropic/claude-3-haiku",
-        api_key: Optional[str] = None,
+        model: str = "claude-3-haiku",
         temperature: float = 0.3,
-        max_tokens: int = 1024,
-        timeout: int = 60,
+        max_tokens: int = 4096,
+        timeout: int = 120,
     ):
-        self.provider = provider
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout = timeout
         
-        # Get provider config
-        if provider not in PROVIDERS:
-            raise ValueError(f"Unknown provider: {provider}")
-        self._config = PROVIDERS[provider]
+        # Get API configuration from environment
+        self._api_url = os.environ.get("LLM_API_URL", "https://openrouter.ai/api/v1/chat/completions")
+        self._api_key = os.environ.get("LLM_API_KEY") or os.environ.get("OPENROUTER_API_KEY", "")
         
-        # Get API key
-        self.api_key = api_key or os.environ.get(self._config["key_env"], "")
-        if not self.api_key:
-            _log(f"Warning: {self._config['key_env']} not set")
+        if not self._api_key:
+            _log("Warning: LLM_API_KEY or OPENROUTER_API_KEY not set")
         
         # Stats
         self.total_tokens = 0
@@ -192,33 +142,43 @@ class LLM:
         
         # HTTP client
         self._client = httpx.Client(timeout=timeout)
+        
+        # Function handlers
+        self._function_handlers: Dict[str, Callable] = {}
+    
+    def register_function(self, name: str, handler: Callable):
+        """Register a function handler for function calling."""
+        self._function_handlers[name] = handler
     
     def ask(
         self,
         prompt: str,
         system: Optional[str] = None,
+        tools: Optional[List[Tool]] = None,
         **kwargs
     ) -> LLMResponse:
         """
-        Ask a simple question.
+        Ask a question.
         
         Args:
             prompt: User prompt
             system: Optional system prompt
+            tools: Optional list of tools/functions
             **kwargs: Override model, temperature, max_tokens
         
         Returns:
-            LLMResponse with text, tokens, cost
+            LLMResponse with text, function_calls, tokens, cost
         """
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        return self.chat(messages, **kwargs)
+        return self.chat(messages, tools=tools, **kwargs)
     
     def chat(
         self,
         messages: List[Dict[str, str]],
+        tools: Optional[List[Tool]] = None,
         **kwargs
     ) -> LLMResponse:
         """
@@ -226,10 +186,11 @@ class LLM:
         
         Args:
             messages: List of {"role": "user/assistant/system", "content": "..."}
+            tools: Optional list of tools/functions for function calling
             **kwargs: Override model, temperature, max_tokens
         
         Returns:
-            LLMResponse with text, tokens, cost
+            LLMResponse with text, function_calls, tokens, cost
         """
         model = kwargs.get("model", self.model)
         temperature = kwargs.get("temperature", self.temperature)
@@ -238,119 +199,173 @@ class LLM:
         start = time.time()
         
         try:
-            if self.provider == "anthropic":
-                response = self._chat_anthropic(messages, model, temperature, max_tokens)
-            else:
-                response = self._chat_openai(messages, model, temperature, max_tokens)
+            # Build request
+            payload: Dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
             
-            response.latency_ms = int((time.time() - start) * 1000)
+            # Add tools if provided
+            if tools:
+                payload["tools"] = [t.to_dict() for t in tools]
+                payload["tool_choice"] = "auto"
+            
+            # Make request
+            headers = {
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            }
+            
+            response = self._client.post(
+                self._api_url,
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            # Parse response
+            choice = data.get("choices", [{}])[0]
+            message = choice.get("message", {})
+            
+            text = message.get("content", "") or ""
+            
+            # Parse function calls
+            function_calls = []
+            tool_calls = message.get("tool_calls", [])
+            for tc in tool_calls:
+                if tc.get("type") == "function":
+                    func = tc.get("function", {})
+                    try:
+                        args = json.loads(func.get("arguments", "{}"))
+                    except:
+                        args = {}
+                    function_calls.append(FunctionCall(
+                        name=func.get("name", ""),
+                        arguments=args,
+                        id=tc.get("id"),
+                    ))
+            
+            # Calculate tokens and cost
+            usage = data.get("usage", {})
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+            total_tokens = prompt_tokens + completion_tokens
+            
+            cost = self._calculate_cost(model, prompt_tokens, completion_tokens)
+            latency_ms = int((time.time() - start) * 1000)
             
             # Update stats
-            self.total_tokens += response.tokens
-            self.total_cost += response.cost
+            self.total_tokens += total_tokens
+            self.total_cost += cost
             self.request_count += 1
             
-            _log(f"{model}: {response.tokens} tokens, ${response.cost:.4f}, {response.latency_ms}ms")
-            return response
+            _log(f"{model}: {total_tokens} tokens, ${cost:.4f}, {latency_ms}ms")
+            
+            return LLMResponse(
+                text=text,
+                model=model,
+                tokens=total_tokens,
+                cost=cost,
+                latency_ms=latency_ms,
+                function_calls=function_calls,
+                raw=data,
+            )
             
         except Exception as e:
             _log(f"Error: {e}")
             raise
     
-    def _chat_openai(
-        self,
-        messages: List[Dict[str, str]],
-        model: str,
-        temperature: float,
-        max_tokens: int,
-    ) -> LLMResponse:
-        """OpenAI/OpenRouter compatible API."""
-        headers = self._config["headers"](self.api_key)
-        
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        
-        response = self._client.post(
-            self._config["url"],
-            headers=headers,
-            json=payload,
-        )
-        response.raise_for_status()
-        data = response.json()
-        
-        text = data["choices"][0]["message"]["content"]
-        usage = data.get("usage", {})
-        prompt_tokens = usage.get("prompt_tokens", 0)
-        completion_tokens = usage.get("completion_tokens", 0)
-        total_tokens = prompt_tokens + completion_tokens
-        
-        # Calculate cost
-        pricing = PRICING.get(model, (0.5, 1.5))
-        cost = (prompt_tokens * pricing[0] + completion_tokens * pricing[1]) / 1_000_000
-        
-        return LLMResponse(
-            text=text,
-            model=model,
-            tokens=total_tokens,
-            cost=cost,
-        )
+    def execute_function(self, call: FunctionCall) -> Any:
+        """Execute a registered function."""
+        if call.name not in self._function_handlers:
+            raise ValueError(f"Unknown function: {call.name}")
+        return self._function_handlers[call.name](**call.arguments)
     
-    def _chat_anthropic(
+    def chat_with_functions(
         self,
         messages: List[Dict[str, str]],
-        model: str,
-        temperature: float,
-        max_tokens: int,
+        tools: List[Tool],
+        max_iterations: int = 10,
+        **kwargs
     ) -> LLMResponse:
-        """Anthropic native API."""
-        headers = self._config["headers"](self.api_key)
+        """
+        Chat with automatic function execution.
         
-        # Extract system message
-        system = None
-        user_messages = []
-        for msg in messages:
-            if msg["role"] == "system":
-                system = msg["content"]
-            else:
-                user_messages.append(msg)
+        Automatically executes function calls and continues conversation
+        until the model returns a text response.
         
-        payload = {
-            "model": model,
-            "messages": user_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
+        Args:
+            messages: Initial messages
+            tools: Available tools
+            max_iterations: Max function call iterations
+            **kwargs: Model parameters
+        
+        Returns:
+            Final LLMResponse
+        """
+        messages = list(messages)  # Copy
+        
+        for _ in range(max_iterations):
+            response = self.chat(messages, tools=tools, **kwargs)
+            
+            if not response.function_calls:
+                return response
+            
+            # Execute functions and add results
+            for call in response.function_calls:
+                try:
+                    result = self.execute_function(call)
+                    messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": call.id,
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": json.dumps(call.arguments),
+                            }
+                        }]
+                    })
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": json.dumps(result) if not isinstance(result, str) else result,
+                    })
+                except Exception as e:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": f"Error: {e}",
+                    })
+        
+        return response
+    
+    def _calculate_cost(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
+        """Calculate cost based on model pricing."""
+        # Pricing per 1M tokens (input, output)
+        pricing = {
+            "claude-3-haiku": (0.25, 1.25),
+            "claude-3-sonnet": (3.0, 15.0),
+            "claude-3-opus": (15.0, 75.0),
+            "claude-3.5-sonnet": (3.0, 15.0),
+            "gpt-4o": (5.0, 15.0),
+            "gpt-4o-mini": (0.15, 0.6),
+            "gpt-4-turbo": (10.0, 30.0),
+            "gpt-3.5-turbo": (0.5, 1.5),
         }
-        if system:
-            payload["system"] = system
         
-        response = self._client.post(
-            self._config["url"],
-            headers=headers,
-            json=payload,
-        )
-        response.raise_for_status()
-        data = response.json()
+        # Find matching pricing
+        input_price, output_price = 0.5, 1.5  # Default
+        for key, prices in pricing.items():
+            if key in model.lower():
+                input_price, output_price = prices
+                break
         
-        text = data["content"][0]["text"]
-        usage = data.get("usage", {})
-        prompt_tokens = usage.get("input_tokens", 0)
-        completion_tokens = usage.get("output_tokens", 0)
-        total_tokens = prompt_tokens + completion_tokens
-        
-        # Calculate cost
-        pricing = PRICING.get(model, (0.25, 1.25))
-        cost = (prompt_tokens * pricing[0] + completion_tokens * pricing[1]) / 1_000_000
-        
-        return LLMResponse(
-            text=text,
-            model=model,
-            tokens=total_tokens,
-            cost=cost,
-        )
+        return (prompt_tokens * input_price + completion_tokens * output_price) / 1_000_000
     
     def close(self):
         """Close HTTP client."""
