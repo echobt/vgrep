@@ -4,35 +4,35 @@ Build agents with streaming LLM support.
 
 ## Providers
 
-- **OpenRouter** (default) - Access to Claude, GPT-4, Llama, Mixtral, etc.
-- **Chutes** - Alternative provider
+- **OpenRouter** (default) - Claude, GPT-4, Llama, Mixtral
+- **Chutes** - Llama, Qwen, Mixtral
 
 ## Features
 
 - **Streaming** - See LLM responses in real-time
 - **Multi-Model** - Use different models per call
 - **Function Calling** - Define custom tools
-- **Early Stop** - Stop streaming based on content
+- **Structured Errors** - JSON error responses with codes
 
 ## Quick Start
 
 ### Python
 
 ```python
-from term_sdk import Agent, Request, Response, LLM, run
+from term_sdk import Agent, Request, Response, LLM, LLMError, run
 
 class MyAgent(Agent):
     def setup(self):
         self.llm = LLM()
     
     def solve(self, req: Request) -> Response:
-        # Streaming - see response in real-time
-        full_response = ""
-        for chunk in self.llm.stream("Solve this", model="claude-3-haiku"):
-            print(chunk, end="", flush=True)
-            full_response += chunk
-        
-        return Response.from_llm(full_response)
+        try:
+            for chunk in self.llm.stream("Solve", model="claude-3-haiku"):
+                print(chunk, end="", flush=True)
+            return Response.from_llm(chunk)
+        except LLMError as e:
+            print(f"Error {e.code}: {e.message}")
+            return Response.done()
 
 if __name__ == "__main__":
     run(MyAgent())
@@ -41,18 +41,21 @@ if __name__ == "__main__":
 ### TypeScript
 
 ```typescript
-import { Agent, Request, Response, LLM, run } from 'term-sdk';
+import { Agent, Request, Response, LLM, LLMError, run } from 'term-sdk';
 
 class MyAgent implements Agent {
   private llm = new LLM();
 
   async solve(req: Request): Promise<Response> {
-    let fullResponse = "";
-    for await (const chunk of this.llm.stream("Solve", { model: "claude-3-haiku" })) {
-      process.stdout.write(chunk);
-      fullResponse += chunk;
+    try {
+      for await (const chunk of this.llm.stream("Solve", { model: "claude-3-haiku" })) {
+        process.stdout.write(chunk);
+      }
+      return Response.fromLLM(chunk);
+    } catch (e) {
+      if (e instanceof LLMError) console.error(`Error ${e.code}`);
+      return Response.done();
     }
-    return Response.fromLLM(fullResponse);
   }
 }
 
@@ -68,104 +71,105 @@ struct MyAgent { llm: LLM }
 
 impl Agent for MyAgent {
     fn solve(&mut self, req: &Request) -> Response {
-        let result = self.llm.ask_stream(
-            "Solve this",
-            "claude-3-haiku",
-            |chunk| {
-                print!("{}", chunk);
-                true
-            }
-        );
-
-        match result {
+        match self.llm.ask_stream("Solve", "claude-3-haiku", |c| { print!("{}", c); true }) {
             Ok(r) => Response::from_llm(&r.text),
-            Err(_) => Response::done(),
+            Err(e) => { eprintln!("Error: {}", e); Response::done() }
         }
     }
 }
 
-fn main() {
-    run(&mut MyAgent { llm: LLM::new() });
-}
+fn main() { run(&mut MyAgent { llm: LLM::new() }); }
 ```
 
-## Streaming API
+## Streaming
 
 ### Python
-
 ```python
-llm = LLM()
-
-# Iterator - yields chunks
+# Iterator
 for chunk in llm.stream("Question", model="claude-3-haiku"):
     print(chunk, end="")
 
-# With callback - stop when JSON is complete
-def check_complete(chunk):
-    # Continue until we see closing brace of JSON
-    return True  # Or implement your own logic
-
-result = llm.ask_stream("Question", model="claude-3-opus", on_chunk=check_complete)
+# With callback
+result = llm.ask_stream("Question", model="gpt-4o", on_chunk=lambda c: True)
 ```
 
 ### TypeScript
-
 ```typescript
-const llm = new LLM();
-
 // Async iterator
 for await (const chunk of llm.stream("Question", { model: "claude-3-haiku" })) {
   process.stdout.write(chunk);
 }
 
 // With callback
-const result = await llm.askStream("Question", {
-  model: "claude-3-opus",
-  onChunk: (chunk) => true
-});
+const result = await llm.askStream("Question", { model: "gpt-4o", onChunk: (c) => true });
 ```
 
 ### Rust
-
 ```rust
-let mut llm = LLM::new();
-
 let result = llm.ask_stream("Question", "claude-3-haiku", |chunk| {
     print!("{}", chunk);
-    true
+    true  // false to stop
 })?;
 ```
 
 ## Error Handling
 
-Errors are returned as structured JSON:
+All SDKs return structured JSON errors:
+
+```json
+{
+  "error": {
+    "code": "rate_limit",
+    "message": "Rate limit exceeded",
+    "details": {
+      "http_status": 429,
+      "model": "claude-3-haiku",
+      "provider": "openrouter"
+    }
+  }
+}
+```
+
+### Error Codes
+
+| Code | HTTP | Description |
+|------|------|-------------|
+| `invalid_provider` | - | Unknown provider |
+| `no_model` | - | No model specified |
+| `authentication_error` | 401 | Invalid API key |
+| `permission_denied` | 403 | Access denied |
+| `not_found` | 404 | Model not found |
+| `rate_limit` | 429 | Rate limit exceeded |
+| `server_error` | 500 | Provider error |
+| `service_unavailable` | 503 | Service unavailable |
+| `unknown_function` | - | Function not registered |
 
 ### Python
-
 ```python
+from term_sdk import LLMError
+
 try:
-    result = llm.ask("Question", model="claude-3-haiku")
-except Exception as e:
-    # e contains detailed error info
-    print(f"LLM Error: {e}")
+    result = llm.ask("Q", model="claude-3-haiku")
+except LLMError as e:
+    print(e.code, e.message, e.details)
 ```
 
 ### TypeScript
-
 ```typescript
+import { LLMError } from 'term-sdk';
+
 try {
-  const result = await llm.ask("Question", { model: "claude-3-haiku" });
-} catch (error) {
-  console.error("LLM Error:", error.message);
+  await llm.ask("Q", { model: "claude-3-haiku" });
+} catch (e) {
+  if (e instanceof LLMError) console.log(e.code, e.details);
 }
 ```
 
 ### Rust
-
 ```rust
-match llm.ask("Question", "claude-3-haiku") {
-    Ok(response) => println!("{}", response.text),
-    Err(error) => eprintln!("LLM Error: {}", error),
+match llm.ask("Q", "claude-3-haiku") {
+    Ok(r) => println!("{}", r.text),
+    Err(json) => eprintln!("{}", json),  // JSON error string
 }
 ```
 
@@ -180,16 +184,15 @@ match llm.ask("Question", "claude-3-haiku") {
 
 ## Models
 
-| Model | Provider | Speed | Cost |
-|-------|----------|-------|------|
-| `claude-3-haiku` | OpenRouter | Fast | $ |
-| `claude-3-sonnet` | OpenRouter | Medium | $$ |
-| `claude-3-opus` | OpenRouter | Slow | $$$ |
-| `gpt-4o` | OpenRouter | Medium | $$ |
-| `gpt-4o-mini` | OpenRouter | Fast | $ |
-| `llama-3-70b` | OpenRouter/Chutes | Medium | $ |
-| `mixtral-8x7b` | OpenRouter/Chutes | Fast | $ |
-| `qwen-72b` | Chutes | Medium | $ |
+| Model | Speed | Cost |
+|-------|-------|------|
+| `claude-3-haiku` | Fast | $ |
+| `claude-3-sonnet` | Medium | $$ |
+| `claude-3-opus` | Slow | $$$ |
+| `gpt-4o` | Medium | $$ |
+| `gpt-4o-mini` | Fast | $ |
+| `llama-3-70b` | Medium | $ |
+| `mixtral-8x7b` | Fast | $ |
 
 ## Installation
 
@@ -208,3 +211,9 @@ cd sdk/typescript && npm install && npm run build
 [dependencies]
 term-sdk = { path = "sdk/rust" }
 ```
+
+## Documentation
+
+- [Python SDK](./python/README.md)
+- [TypeScript SDK](./typescript/README.md)
+- [Rust SDK](./rust/README.md)

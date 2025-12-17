@@ -1,6 +1,6 @@
 # Rust SDK
 
-Build Term Challenge agents in Rust with dynamic multi-model LLM support.
+Build agents with streaming LLM support.
 
 ## Installation
 
@@ -20,68 +20,159 @@ struct MyAgent;
 
 impl Agent for MyAgent {
     fn solve(&mut self, req: &Request) -> Response {
-        if req.is_first() { return Response::cmd("ls -la"); }
+        if req.step == 1 {
+            return Response::cmd("ls -la");
+        }
         Response::done()
     }
 }
 
-fn main() { run(&mut MyAgent); }
+fn main() {
+    run(&mut MyAgent);
+}
 ```
 
-## Multi-Model LLM
-
-Use different models for different tasks:
+## Streaming LLM
 
 ```rust
 use term_sdk::{Agent, Request, Response, LLM, run};
 
-struct SmartAgent {
+struct StreamingAgent {
     llm: LLM,
 }
 
-impl SmartAgent {
-    fn new() -> Self {
-        Self { llm: LLM::new() }  // No default model
-    }
-}
-
-impl Agent for SmartAgent {
+impl Agent for StreamingAgent {
     fn solve(&mut self, req: &Request) -> Response {
-        // Fast model for quick decisions
-        let quick = self.llm.ask(
-            "Should I use ls or find?",
-            "claude-3-haiku"
-        );
-
-        // Powerful model for complex reasoning
-        let solution = self.llm.ask(
-            &format!("How to: {}", req.instruction),
-            "claude-3-opus"
-        );
-
-        // Code-optimized model
-        let code = self.llm.ask(
-            "Write the bash command",
-            "gpt-4o"
-        );
-
-        match code {
-            Ok(r) => Response::from_llm(&r.text),
-            Err(_) => Response::done(),
-        }
-    }
-
-    fn cleanup(&mut self) {
-        eprintln!("Total cost: ${:.4}", self.llm.total_cost);
-        for (model, stats) in self.llm.get_all_stats() {
-            eprintln!("{}: {} tokens, ${:.4}", model, stats.tokens, stats.cost);
+        let prompt = format!("Task: {}\nOutput: {:?}", req.instruction, req.output);
+        
+        // Stream with callback
+        match self.llm.ask_stream(&prompt, "claude-3-haiku", |chunk| {
+            print!("{}", chunk);
+            true  // Return false to stop early
+        }) {
+            Ok(result) => Response::from_llm(&result.text),
+            Err(e) => {
+                // e is JSON: {"error": {"code": "...", "message": "..."}}
+                eprintln!("Error: {}", e);
+                Response::done()
+            }
         }
     }
 }
 
 fn main() {
-    run(&mut SmartAgent::new());
+    let mut agent = StreamingAgent { llm: LLM::new() };
+    run(&mut agent);
 }
+```
+
+## Streaming API
+
+```rust
+use term_sdk::LLM;
+
+let mut llm = LLM::new();
+
+// Streaming with callback
+let result = llm.ask_stream("Tell a story", "claude-3-haiku", |chunk| {
+    print!("{}", chunk);
+    true  // Return false to stop early
+})?;
+println!("\nTotal: {}", result.text);
+
+// Non-streaming
+let result = llm.ask("Question", "claude-3-haiku")?;
+```
+
+## Multi-Model Usage
+
+```rust
+use term_sdk::LLM;
+
+let mut llm = LLM::new();
+
+// Fast model for quick decisions
+let quick = llm.ask("Should I use ls or find?", "claude-3-haiku")?;
+
+// Powerful model for complex reasoning
+let solution = llm.chat_with_model(
+    &[Message::user("Solve step by step")],
+    "claude-3-opus",
+    Some(0.2),   // temperature
+    None,        // max_tokens
+    None,        // tools
+)?;
+
+// Per-model stats
+for (model, stats) in llm.get_all_stats() {
+    println!("{}: {} tokens, ${:.4}", model, stats.tokens, stats.cost);
+}
+```
+
+## Error Handling
+
+Errors are returned as JSON strings:
+
+```rust
+use term_sdk::LLM;
+
+let mut llm = LLM::new();
+
+match llm.ask("Question", "claude-3-haiku") {
+    Ok(response) => println!("{}", response.text),
+    Err(error_json) => {
+        // error_json: {"error": {"code": "rate_limit", "message": "...", "details": {...}}}
+        eprintln!("Error: {}", error_json);
+        
+        // Parse if needed
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&error_json) {
+            let code = parsed["error"]["code"].as_str().unwrap_or("unknown");
+            let message = parsed["error"]["message"].as_str().unwrap_or("");
+            eprintln!("Code: {}, Message: {}", code, message);
+        }
+    }
+}
+```
+
+### Error Codes
+
+| Code | HTTP | Description |
+|------|------|-------------|
+| `authentication_error` | 401 | Invalid API key |
+| `permission_denied` | 403 | Access denied |
+| `not_found` | 404 | Model not found |
+| `rate_limit` | 429 | Rate limit exceeded |
+| `server_error` | 500 | Provider error |
+| `no_model` | - | No model specified |
+| `unknown_function` | - | Function not registered |
+
+## Function Calling
+
+```rust
+use term_sdk::{LLM, Tool, Message};
+
+let mut llm = LLM::new();
+
+// Register function
+llm.register_function("search", |args| {
+    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    Ok(format!("Found: {}", query))
+});
+
+// Define tool
+let tools = vec![Tool::new("search", "Search for files")
+    .with_parameters(serde_json::json!({
+        "type": "object",
+        "properties": { "query": { "type": "string" } }
+    }))];
+
+// Chat with functions
+let result = llm.chat_with_functions(
+    &[Message::user("Search for Rust files")],
+    &tools,
+    "claude-3-sonnet",
+    5,  // max iterations
+)?;
 ```
 
 ## API Reference
@@ -90,65 +181,27 @@ fn main() {
 
 ```rust
 impl LLM {
-    /// Create without default model
     fn new() -> Self;
+    fn with_provider(provider: Provider) -> Self;
+    fn default_model(self, model: &str) -> Self;
+    fn temperature(self, t: f32) -> Self;
+    fn max_tokens(self, t: u32) -> Self;
     
-    /// Create with default model
-    fn with_default_model(model: Option<String>) -> Self;
+    // Streaming
+    fn ask_stream<F>(&mut self, prompt: &str, model: &str, on_chunk: F) -> Result<LLMResponse, String>
+    where F: FnMut(&str) -> bool;
     
-    /// Ask with specified model
+    // Non-streaming
     fn ask(&mut self, prompt: &str, model: &str) -> Result<LLMResponse, String>;
+    fn chat(&mut self, messages: &[Message], tools: Option<&[Tool]>) -> Result<LLMResponse, String>;
+    fn chat_with_functions(&mut self, messages, tools, model, max_iter) -> Result<LLMResponse, String>;
     
-    /// Ask with system prompt
-    fn ask_with_system(&mut self, system: &str, prompt: &str, model: &str) 
-        -> Result<LLMResponse, String>;
-    
-    /// Chat with model and options
-    fn chat_with_model(
-        &mut self,
-        messages: &[Message],
-        model: &str,
-        temperature: Option<f32>,
-        max_tokens: Option<u32>,
-        tools: Option<&[Tool]>,
-    ) -> Result<LLMResponse, String>;
-    
-    /// Chat with auto function execution
-    fn chat_with_functions(
-        &mut self,
-        messages: &[Message],
-        tools: &[Tool],
-        model: &str,
-        max_iterations: usize,
-    ) -> Result<LLMResponse, String>;
-    
+    // Functions
     fn register_function<F>(&mut self, name: &str, handler: F);
-    fn execute_function(&self, call: &FunctionCall) -> Result<String, String>;
     
+    // Stats
     fn get_stats(&self, model: Option<&str>) -> Option<ModelStats>;
     fn get_all_stats(&self) -> &HashMap<String, ModelStats>;
-    
-    // Fields
-    total_tokens: u32;
-    total_cost: f64;
-    request_count: u32;
-}
-```
-
-### LLMResponse
-
-```rust
-pub struct LLMResponse {
-    pub text: String,
-    pub model: String,
-    pub tokens: u32,
-    pub cost: f64,
-    pub latency_ms: u64,
-    pub function_calls: Vec<FunctionCall>,
-}
-
-impl LLMResponse {
-    fn has_function_calls(&self) -> bool;
 }
 ```
 
@@ -165,114 +218,36 @@ pub struct Request {
 }
 
 impl Request {
-    fn is_first(&self) -> bool;
-    fn is_ok(&self) -> bool;
-    fn failed(&self) -> bool;
+    fn first(&self) -> bool;   // step == 1
+    fn ok(&self) -> bool;      // exit_code == Some(0)
+    fn failed(&self) -> bool;  // exit_code.is_some() && exit_code != Some(0)
     fn has(&self, pattern: &str) -> bool;
-    fn has_any(&self, patterns: &[&str]) -> bool;
 }
 ```
 
 ### Response
 
 ```rust
-impl Response {
-    fn cmd(command: impl Into<String>) -> Self;
-    fn say(text: impl Into<String>) -> Self;
-    fn done() -> Self;
-    fn from_llm(text: &str) -> Self;
-    
-    fn with_text(self, text: impl Into<String>) -> Self;
-    fn complete(self) -> Self;
-}
+Response::cmd("ls -la")         // Execute command
+Response::say("message")        // Text only
+Response::done()                // Task complete
+Response::from_llm(&text)       // Parse from LLM
 ```
 
-## Examples
+## Providers
 
-### Multi-Model Strategy
-
-```rust
-use term_sdk::{Agent, Request, Response, LLM, run};
-
-struct StrategyAgent { llm: LLM }
-
-impl Agent for StrategyAgent {
-    fn solve(&mut self, req: &Request) -> Response {
-        // 1. Quick analysis
-        let analysis = self.llm.ask(
-            &format!("Analyze briefly: {}", req.instruction),
-            "claude-3-haiku"
-        ).unwrap_or_else(|_| LLMResponse::default());
-
-        // 2. Decide complexity
-        let is_complex = analysis.text.to_lowercase().contains("complex");
-
-        // 3. Use appropriate model
-        let model = if is_complex { "claude-3-opus" } else { "claude-3-haiku" };
-        
-        match self.llm.ask(&req.instruction, model) {
-            Ok(r) => Response::from_llm(&r.text),
-            Err(_) => Response::done(),
-        }
-    }
-}
-
-fn main() {
-    run(&mut StrategyAgent { llm: LLM::new() });
-}
-```
-
-### Function Calling
-
-```rust
-use term_sdk::{Agent, Request, Response, LLM, Tool, Message, run};
-
-struct ToolAgent { llm: LLM }
-
-impl Agent for ToolAgent {
-    fn setup(&mut self) {
-        self.llm.register_function("search", |args| {
-            let pattern = args.get("pattern")
-                .and_then(|v| v.as_str())
-                .unwrap_or("*");
-            Ok(format!("Found: {}", pattern))
-        });
-    }
-
-    fn solve(&mut self, req: &Request) -> Response {
-        let tools = vec![
-            Tool::new("search", "Search files")
-                .with_parameters(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "pattern": {"type": "string"}
-                    }
-                })),
-        ];
-
-        match self.llm.chat_with_functions(
-            &[Message::user(&req.instruction)],
-            &tools,
-            "claude-3-sonnet",
-            5,
-        ) {
-            Ok(r) => Response::from_llm(&r.text),
-            Err(_) => Response::done(),
-        }
-    }
-}
-
-fn main() {
-    run(&mut ToolAgent { llm: LLM::new() });
-}
-```
+| Provider | Env Variable |
+|----------|--------------|
+| OpenRouter (default) | `OPENROUTER_API_KEY` |
+| Chutes | `CHUTES_API_KEY` |
 
 ## Models
 
-| Model | Speed | Cost | Best For |
-|-------|-------|------|----------|
-| `claude-3-haiku` | Fast | $ | Quick decisions |
-| `claude-3-sonnet` | Medium | $$ | Balanced, tool use |
-| `claude-3-opus` | Slow | $$$ | Complex reasoning |
-| `gpt-4o` | Medium | $$ | Code generation |
-| `gpt-4o-mini` | Fast | $ | Fast code tasks |
+| Model | Speed | Cost |
+|-------|-------|------|
+| `claude-3-haiku` | Fast | $ |
+| `claude-3-sonnet` | Medium | $$ |
+| `claude-3-opus` | Slow | $$$ |
+| `gpt-4o` | Medium | $$ |
+| `gpt-4o-mini` | Fast | $ |
+| `llama-3-70b` | Medium | $ |

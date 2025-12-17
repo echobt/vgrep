@@ -1,6 +1,6 @@
 # Term SDK for Python
 
-Build agents for Term Challenge.
+Build agents with streaming LLM support.
 
 ## Installation
 
@@ -25,29 +25,111 @@ if __name__ == "__main__":
     run(MyAgent())
 ```
 
-## With LLM
+## With LLM (Streaming)
 
 ```python
-from term_sdk import Agent, Request, Response, LLM, run
+from term_sdk import Agent, Request, Response, LLM, LLMError, run
 
 class LLMAgent(Agent):
     def setup(self):
-        self.llm = LLM(model="anthropic/claude-3-haiku")
+        self.llm = LLM()  # Uses OpenRouter by default
     
     def solve(self, req: Request) -> Response:
-        result = self.llm.ask(f"""
-Task: {req.instruction}
-Step: {req.step}
-Last command: {req.last_command}
-Output: {req.output}
-Exit code: {req.exit_code}
-
-Return JSON: {{"command": "...", "task_complete": false}}
-""")
-        return Response.from_llm(result.text)
+        try:
+            # Streaming - see response in real-time
+            full_text = ""
+            for chunk in self.llm.stream(
+                f"Task: {req.instruction}\nOutput: {req.output}",
+                model="claude-3-haiku"
+            ):
+                print(chunk, end="", flush=True)
+                full_text += chunk
+            
+            return Response.from_llm(full_text)
+        except LLMError as e:
+            print(f"Error {e.code}: {e.message}")
+            return Response.done()
 
 if __name__ == "__main__":
     run(LLMAgent())
+```
+
+## Streaming API
+
+```python
+from term_sdk import LLM, LLMError
+
+llm = LLM()
+
+# Iterator - yields chunks
+for chunk in llm.stream("Tell a story", model="claude-3-haiku"):
+    print(chunk, end="")
+
+# With callback - return False to stop
+result = llm.ask_stream(
+    "Solve this problem",
+    model="gpt-4o",
+    on_chunk=lambda text: True  # Return False to stop early
+)
+print(result.text)
+
+# Non-streaming
+result = llm.ask("Question", model="claude-3-haiku")
+```
+
+## Error Handling
+
+```python
+from term_sdk import LLM, LLMError
+
+llm = LLM()
+
+try:
+    result = llm.ask("Question", model="claude-3-haiku")
+except LLMError as e:
+    print(f"Code: {e.code}")           # "rate_limit"
+    print(f"Message: {e.message}")     # "Rate limit exceeded"
+    print(f"Details: {e.details}")     # {"http_status": 429, ...}
+    print(f"JSON: {e.to_json()}")      # Full JSON error
+```
+
+### Error Codes
+
+| Code | HTTP | Description |
+|------|------|-------------|
+| `invalid_provider` | - | Unknown provider |
+| `no_model` | - | No model specified |
+| `authentication_error` | 401 | Invalid API key |
+| `permission_denied` | 403 | Access denied |
+| `not_found` | 404 | Model not found |
+| `rate_limit` | 429 | Rate limit exceeded |
+| `server_error` | 500 | Provider error |
+| `service_unavailable` | 503 | Service unavailable |
+| `unknown_function` | - | Function not registered |
+
+## Function Calling
+
+```python
+from term_sdk import LLM, Tool
+
+llm = LLM()
+
+# Register function
+llm.register_function("search", lambda query: f"Results for {query}")
+
+# Define tool
+tools = [Tool(
+    name="search",
+    description="Search for files",
+    parameters={"type": "object", "properties": {"query": {"type": "string"}}}
+)]
+
+# Chat with functions
+result = llm.chat_with_functions(
+    messages=[{"role": "user", "content": "Search for Python files"}],
+    tools=tools,
+    model="claude-3-haiku"
+)
 ```
 
 ## API Reference
@@ -72,36 +154,38 @@ Properties:
 ### Response
 
 ```python
-Response.cmd("ls -la")     # Execute command
-Response.done()            # Task complete
-Response.from_llm(text)    # Parse from LLM output
+Response.cmd("ls -la")       # Execute command
+Response.done()              # Task complete
+Response.from_llm(text)      # Parse from LLM output
+Response.say("message")      # Text without command
 ```
 
 ### LLM
 
 ```python
 # OpenRouter (default)
-llm = LLM(model="anthropic/claude-3-haiku")
-llm = LLM(model="openai/gpt-4o")
+llm = LLM()
+llm = LLM(provider="openrouter")
 
-# Direct providers
-llm = LLM(provider="openai", model="gpt-4o")
-llm = LLM(provider="anthropic", model="claude-3-haiku-20240307")
+# Chutes
+llm = LLM(provider="chutes")
 
-# Usage
-response = llm.ask("question")
-response = llm.ask("question", system="You are helpful.")
-response = llm.chat([
-    {"role": "user", "content": "Hello"}
-])
-
-print(response.text)    # Response text
-print(response.tokens)  # Token count
-print(response.cost)    # Cost in USD
+# With default model
+llm = LLM(default_model="claude-3-haiku")
 ```
+
+## Providers
+
+| Provider | Env Variable | Models |
+|----------|--------------|--------|
+| OpenRouter | `OPENROUTER_API_KEY` | Claude, GPT-4, Llama, Mixtral |
+| Chutes | `CHUTES_API_KEY` | Llama, Qwen, Mixtral |
 
 ## Environment Variables
 
-- `OPENROUTER_API_KEY` - OpenRouter API key
-- `OPENAI_API_KEY` - OpenAI API key  
-- `ANTHROPIC_API_KEY` - Anthropic API key
+| Variable | Description |
+|----------|-------------|
+| `LLM_API_KEY` | API key (primary) |
+| `OPENROUTER_API_KEY` | OpenRouter API key |
+| `CHUTES_API_KEY` | Chutes API key |
+| `LLM_API_URL` | Custom API endpoint |

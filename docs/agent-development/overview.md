@@ -1,6 +1,6 @@
 # Agent Development Guide
 
-Build agents for Term Challenge using our SDK.
+Build agents for Term Challenge using our SDK with streaming LLM support.
 
 ## SDK Installation
 
@@ -51,7 +51,7 @@ struct MyAgent;
 
 impl Agent for MyAgent {
     fn solve(&mut self, req: &Request) -> Response {
-        if req.is_first() { return Response::cmd("ls -la"); }
+        if req.step == 1 { return Response::cmd("ls -la"); }
         Response::done()
     }
 }
@@ -59,70 +59,62 @@ impl Agent for MyAgent {
 fn main() { run(&mut MyAgent); }
 ```
 
-## LLM Integration - Multiple Models
+## LLM with Streaming
 
-Use different models dynamically - specify the model on each call:
+See responses in real-time:
 
 ### Python
 
 ```python
-from term_sdk import Agent, Request, Response, LLM, run
+from term_sdk import Agent, Request, Response, LLM, LLMError, run
 
-class MultiModelAgent(Agent):
+class StreamingAgent(Agent):
     def setup(self):
-        self.llm = LLM()  # No default model needed
+        self.llm = LLM()
     
     def solve(self, req: Request) -> Response:
-        # Fast model for quick analysis
-        analysis = self.llm.ask(
-            "Analyze this briefly",
-            model="claude-3-haiku"
-        )
-        
-        # Powerful model for complex reasoning
-        solution = self.llm.ask(
-            f"Solve: {req.instruction}",
-            model="claude-3-opus"
-        )
-        
-        # Different model for code
-        code = self.llm.ask(
-            "Write the code",
-            model="gpt-4o"
-        )
-        
-        return Response.from_llm(solution.text)
-    
-    def cleanup(self):
-        # See per-model stats
-        print(self.llm.get_stats())
+        try:
+            full_text = ""
+            for chunk in self.llm.stream(
+                f"Solve: {req.instruction}",
+                model="claude-3-haiku"
+            ):
+                print(chunk, end="", flush=True)
+                full_text += chunk
+            
+            return Response.from_llm(full_text)
+        except LLMError as e:
+            print(f"Error {e.code}: {e.message}")
+            return Response.done()
 ```
 
 ### TypeScript
 
 ```typescript
-import { Agent, Request, Response, LLM, run } from 'term-sdk';
+import { Agent, Request, Response, LLM, LLMError, run } from 'term-sdk';
 
-class MultiModelAgent implements Agent {
+class StreamingAgent implements Agent {
   private llm = new LLM();
 
   async solve(req: Request): Promise<Response> {
-    // Fast model for quick tasks
-    const analysis = await this.llm.ask("Quick analysis", {
-      model: "claude-3-haiku"
-    });
-    
-    // Powerful model for reasoning
-    const solution = await this.llm.ask(`Solve: ${req.instruction}`, {
-      model: "claude-3-opus",
-      temperature: 0.2
-    });
-    
-    return Response.fromLLM(solution.text);
+    try {
+      let fullText = "";
+      for await (const chunk of this.llm.stream(
+        `Solve: ${req.instruction}`,
+        { model: "claude-3-haiku" }
+      )) {
+        process.stdout.write(chunk);
+        fullText += chunk;
+      }
+      return Response.fromLLM(fullText);
+    } catch (e) {
+      if (e instanceof LLMError) console.error(`Error: ${e.code}`);
+      return Response.done();
+    }
   }
 }
 
-run(new MultiModelAgent());
+run(new StreamingAgent());
 ```
 
 ### Rust
@@ -130,78 +122,109 @@ run(new MultiModelAgent());
 ```rust
 use term_sdk::{Agent, Request, Response, LLM, run};
 
-struct MultiModelAgent { llm: LLM }
+struct StreamingAgent { llm: LLM }
 
-impl Agent for MultiModelAgent {
+impl Agent for StreamingAgent {
     fn solve(&mut self, req: &Request) -> Response {
-        // Fast model
-        let _ = self.llm.ask("Quick check", "claude-3-haiku");
-        
-        // Powerful model
-        match self.llm.ask(&req.instruction, "claude-3-opus") {
+        match self.llm.ask_stream(&req.instruction, "claude-3-haiku", |chunk| {
+            print!("{}", chunk);
+            true
+        }) {
             Ok(r) => Response::from_llm(&r.text),
-            Err(_) => Response::done(),
+            Err(e) => { eprintln!("Error: {}", e); Response::done() }
         }
     }
 }
 
-fn main() {
-    run(&mut MultiModelAgent { llm: LLM::new() });
-}
+fn main() { run(&mut StreamingAgent { llm: LLM::new() }); }
 ```
+
+## Multi-Model Usage
+
+Use different models dynamically:
+
+```python
+from term_sdk import LLM
+
+llm = LLM()
+
+# Fast model for quick analysis
+analysis = llm.ask("Analyze briefly", model="claude-3-haiku")
+
+# Powerful model for complex reasoning
+solution = llm.ask("Solve step by step", model="claude-3-opus")
+
+# Code-optimized model
+code = llm.ask("Write the bash command", model="gpt-4o")
+
+# Check per-model stats
+print(llm.get_stats())
+```
+
+## Error Handling
+
+All SDKs use structured JSON errors:
+
+```python
+from term_sdk import LLM, LLMError
+
+try:
+    result = llm.ask("Question", model="claude-3-haiku")
+except LLMError as e:
+    print(f"Code: {e.code}")        # "rate_limit"
+    print(f"Message: {e.message}")  # "Rate limit exceeded"
+    print(f"Details: {e.details}")  # {"http_status": 429, ...}
+```
+
+### Error Codes
+
+| Code | HTTP | Description |
+|------|------|-------------|
+| `authentication_error` | 401 | Invalid API key |
+| `permission_denied` | 403 | Access denied |
+| `not_found` | 404 | Model not found |
+| `rate_limit` | 429 | Rate limit exceeded |
+| `server_error` | 500 | Provider error |
+| `no_model` | - | No model specified |
+| `unknown_function` | - | Function not registered |
+
+## Providers
+
+| Provider | Env Variable | Models |
+|----------|--------------|--------|
+| OpenRouter (default) | `OPENROUTER_API_KEY` | Claude, GPT-4, Llama, Mixtral |
+| Chutes | `CHUTES_API_KEY` | Llama, Qwen, Mixtral |
 
 ## Available Models
 
-Any model supported by the provider (configured at upload):
-
-| Model | Use Case |
-|-------|----------|
-| `claude-3-haiku` | Fast, cheap, simple tasks |
-| `claude-3-sonnet` | Balanced performance |
-| `claude-3-opus` | Complex reasoning |
-| `gpt-4o` | Code generation |
-| `gpt-4o-mini` | Fast, cheap |
-| `llama-3-70b` | Open source |
-| `mixtral-8x7b` | Open source |
+| Model | Speed | Cost | Best For |
+|-------|-------|------|----------|
+| `claude-3-haiku` | Fast | $ | Quick decisions |
+| `claude-3-sonnet` | Medium | $$ | Balanced |
+| `claude-3-opus` | Slow | $$$ | Complex reasoning |
+| `gpt-4o` | Medium | $$ | Code generation |
+| `gpt-4o-mini` | Fast | $ | Fast code tasks |
+| `llama-3-70b` | Medium | $ | Open source |
+| `mixtral-8x7b` | Fast | $ | Open source |
 
 ## Function Calling
 
-Define custom functions the LLM can call:
-
 ```python
-from term_sdk import Agent, Request, Response, LLM, Tool, run
+from term_sdk import LLM, Tool
 
-class ToolAgent(Agent):
-    def setup(self):
-        self.llm = LLM()
-        self.llm.register_function("search", self.search)
-    
-    def search(self, query: str) -> str:
-        return f"Found: {query}"
-    
-    def solve(self, req: Request) -> Response:
-        tools = [Tool(
-            name="search",
-            description="Search for files",
-            parameters={"type": "object", "properties": {"query": {"type": "string"}}}
-        )]
-        
-        # Use any model with function calling
-        result = self.llm.chat_with_functions(
-            [{"role": "user", "content": req.instruction}],
-            tools,
-            model="claude-3-sonnet"
-        )
-        return Response.from_llm(result.text)
-```
+llm = LLM()
+llm.register_function("search", lambda query: f"Found: {query}")
 
-## Response Types
+tools = [Tool("search", "Search files", {
+    "type": "object",
+    "properties": {"query": {"type": "string"}}
+})]
 
-```python
-Response.cmd("ls -la")                    # Execute command
-Response.say("Analyzing...")              # Text only
-Response.cmd("make").with_text("Building") # Command + text
-Response.done("Completed!")               # Done with message
+result = llm.chat_with_functions(
+    [{"role": "user", "content": "Search for Python files"}],
+    tools,
+    model="claude-3-sonnet"
+)
 ```
 
 ## Protocol

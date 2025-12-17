@@ -1,4 +1,4 @@
-# TypeScript SDK
+# Term SDK for TypeScript
 
 Build agents with streaming LLM support.
 
@@ -17,25 +17,30 @@ import { Agent, Request, Response, run } from 'term-sdk';
 
 class MyAgent implements Agent {
   solve(req: Request): Response {
-    if (req.step === 1) return Response.cmd("ls -la");
-    return Response.done();
+    if (req.step === 1) {
+      return Response.cmd("ls -la");
+    }
+    if (req.has("hello")) {
+      return Response.done();
+    }
+    return Response.cmd("echo hello");
   }
 }
 
 run(new MyAgent());
 ```
 
-## Streaming LLM
+## With LLM (Streaming)
 
 ```typescript
 import { Agent, Request, Response, LLM, LLMError, run } from 'term-sdk';
 
-class StreamingAgent implements Agent {
+class LLMAgent implements Agent {
   private llm = new LLM();
 
   async solve(req: Request): Promise<Response> {
     try {
-      // Stream chunks in real-time
+      // Streaming - see response in real-time
       let fullText = "";
       for await (const chunk of this.llm.stream(
         `Task: ${req.instruction}\nOutput: ${req.output}`,
@@ -55,7 +60,7 @@ class StreamingAgent implements Agent {
   }
 }
 
-run(new StreamingAgent());
+run(new LLMAgent());
 ```
 
 ## Streaming API
@@ -81,34 +86,6 @@ console.log(result.text);
 const result = await llm.ask("Question", { model: "claude-3-haiku" });
 ```
 
-## Multi-Model Usage
-
-```typescript
-import { LLM } from 'term-sdk';
-
-const llm = new LLM();
-
-// Fast model for quick decisions
-const quick = await llm.ask("Should I use ls or find?", {
-  model: "claude-3-haiku"
-});
-
-// Powerful model for complex reasoning
-const solution = await llm.ask("Solve step by step", {
-  model: "claude-3-opus",
-  temperature: 0.2
-});
-
-// Code-optimized model
-const code = await llm.ask("Write bash command", {
-  model: "gpt-4o",
-  maxTokens: 500
-});
-
-// Per-model stats
-console.log(llm.getStats());
-```
-
 ## Error Handling
 
 ```typescript
@@ -132,12 +109,14 @@ try {
 
 | Code | HTTP | Description |
 |------|------|-------------|
+| `invalid_provider` | - | Unknown provider |
+| `no_model` | - | No model specified |
 | `authentication_error` | 401 | Invalid API key |
 | `permission_denied` | 403 | Access denied |
 | `not_found` | 404 | Model not found |
 | `rate_limit` | 429 | Rate limit exceeded |
 | `server_error` | 500 | Provider error |
-| `no_model` | - | No model specified |
+| `service_unavailable` | 503 | Service unavailable |
 | `unknown_function` | - | Function not registered |
 
 ## Function Calling
@@ -148,7 +127,7 @@ import { LLM, Tool } from 'term-sdk';
 const llm = new LLM();
 
 // Register function
-llm.registerFunction("search", async (args) => `Found: ${args.query}`);
+llm.registerFunction("search", async (args) => `Results for ${args.query}`);
 
 // Define tool
 const tools = [new Tool(
@@ -161,82 +140,64 @@ const tools = [new Tool(
 const result = await llm.chatWithFunctions(
   [{ role: "user", content: "Search for TypeScript files" }],
   tools,
-  { model: "claude-3-sonnet" }
+  { model: "claude-3-haiku" }
 );
 ```
 
 ## API Reference
 
-### LLM
-
-```typescript
-class LLM {
-  constructor(options?: {
-    provider?: 'openrouter' | 'chutes';
-    defaultModel?: string;
-    temperature?: number;
-    maxTokens?: number;
-  });
-  
-  // Streaming
-  stream(prompt: string, options: { model: string }): AsyncGenerator<string>;
-  askStream(prompt: string, options: { model: string, onChunk?: (c: string) => boolean }): Promise<LLMResponse>;
-  
-  // Non-streaming
-  ask(prompt: string, options: { model: string }): Promise<LLMResponse>;
-  chat(messages: Message[], options: { model: string }): Promise<LLMResponse>;
-  chatWithFunctions(messages, tools, options): Promise<LLMResponse>;
-  
-  // Functions
-  registerFunction(name: string, handler: Function): void;
-  
-  // Stats
-  getStats(model?: string): ModelStats;
-}
-```
-
 ### Request
 
-```typescript
-class Request {
-  instruction: string;
-  step: number;
-  lastCommand: string | null;
-  output: string | null;
-  exitCode: number | null;
-  cwd: string;
-  
-  get first(): boolean;  // step === 1
-  get ok(): boolean;     // exitCode === 0
-  get failed(): boolean; // exitCode !== null && exitCode !== 0
-  
-  has(...patterns: string[]): boolean;
-}
-```
+| Field | Type | Description |
+|-------|------|-------------|
+| `instruction` | string | Task to complete |
+| `step` | number | Step number (1-indexed) |
+| `lastCommand` | string? | Previous command |
+| `output` | string? | Command output |
+| `exitCode` | number? | Exit code |
+| `cwd` | string | Working directory |
+
+Properties:
+- `req.first` - True on step 1
+- `req.ok` - True if exitCode === 0
+- `req.failed` - True if exitCode !== null && exitCode !== 0
+- `req.has("pattern")` - Check output contains pattern
 
 ### Response
 
 ```typescript
-Response.cmd("ls -la")         // Execute command
-Response.say("message")        // Text only
-Response.done()                // Task complete
-Response.fromLLM(text)         // Parse from LLM
+Response.cmd("ls -la")       // Execute command
+Response.done()              // Task complete
+Response.fromLLM(text)       // Parse from LLM output
+Response.say("message")      // Text without command
+```
+
+### LLM
+
+```typescript
+// OpenRouter (default)
+const llm = new LLM();
+const llm = new LLM({ provider: "openrouter" });
+
+// Chutes
+const llm = new LLM({ provider: "chutes" });
+
+// With default model
+const llm = new LLM({ defaultModel: "claude-3-haiku" });
 ```
 
 ## Providers
 
-| Provider | Env Variable |
-|----------|--------------|
-| OpenRouter (default) | `OPENROUTER_API_KEY` |
-| Chutes | `CHUTES_API_KEY` |
+| Provider | Env Variable | Models |
+|----------|--------------|--------|
+| OpenRouter | `OPENROUTER_API_KEY` | Claude, GPT-4, Llama, Mixtral |
+| Chutes | `CHUTES_API_KEY` | Llama, Qwen, Mixtral |
 
-## Models
+## Environment Variables
 
-| Model | Speed | Cost |
-|-------|-------|------|
-| `claude-3-haiku` | Fast | $ |
-| `claude-3-sonnet` | Medium | $$ |
-| `claude-3-opus` | Slow | $$$ |
-| `gpt-4o` | Medium | $$ |
-| `gpt-4o-mini` | Fast | $ |
-| `llama-3-70b` | Medium | $ |
+| Variable | Description |
+|----------|-------------|
+| `LLM_API_KEY` | API key (primary) |
+| `OPENROUTER_API_KEY` | OpenRouter API key |
+| `CHUTES_API_KEY` | Chutes API key |
+| `LLM_API_URL` | Custom API endpoint |
