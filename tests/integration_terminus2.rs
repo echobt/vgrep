@@ -10,8 +10,9 @@ use term_challenge::{
     ValidatorDistributor, ValidatorInfo, WhitelistConfig,
 };
 
-const OPENROUTER_API_KEY: &str =
-    "REDACTED_API_KEY";
+fn get_api_key() -> String {
+    std::env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| "test-key-not-set".to_string())
+}
 
 /// Simple terminus2-like agent code for testing
 /// Note: Does NOT use 'os' module as it's forbidden by default whitelist
@@ -52,7 +53,7 @@ import requests
 class Terminus2Agent:
     """Terminus2 agent using OpenRouter for LLM calls."""
     
-    OPENROUTER_API_KEY = "REDACTED_API_KEY"
+    OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
     OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
     
     @staticmethod

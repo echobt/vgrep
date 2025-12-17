@@ -4,8 +4,9 @@
 
 use std::time::Instant;
 
-const OPENROUTER_API_KEY: &str =
-    "REDACTED_API_KEY";
+fn get_api_key() -> String {
+    std::env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| "test-key-not-set".to_string())
+}
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 
 /// Make a real LLM call to OpenRouter
@@ -21,7 +22,7 @@ fn call_openrouter(messages: &[serde_json::Value], model: &str) -> Result<String
 
     let response = client
         .post(OPENROUTER_URL)
-        .header("Authorization", format!("Bearer {}", OPENROUTER_API_KEY))
+        .header("Authorization", format!("Bearer {}", get_api_key()))
         .header("Content-Type", "application/json")
         .header("HTTP-Referer", "https://term-challenge.test")
         .json(&payload)
