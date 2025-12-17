@@ -9,14 +9,14 @@
 [![GitHub stars](https://img.shields.io/github/stars/CortexLM/vgrep)](https://github.com/CortexLM/vgrep/stargazers)
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](https://www.rust-lang.org/)
 
-```
- ██╗   ██╗ ██████╗ ██████╗ ███████╗██████╗ 
- ██║   ██║██╔════╝ ██╔══██╗██╔════╝██╔══██╗
- ██║   ██║██║  ███╗██████╔╝█████╗  ██████╔╝
- ╚██╗ ██╔╝██║   ██║██╔══██╗██╔══╝  ██╔═══╝ 
-  ╚████╔╝ ╚██████╔╝██║  ██║███████╗██║     
-   ╚═══╝   ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝     
-```
+<pre>
+██╗   ██╗ ██████╗ ██████╗ ███████╗██████╗ 
+██║   ██║██╔════╝ ██╔══██╗██╔════╝██╔══██╗
+██║   ██║██║  ███╗██████╔╝█████╗  ██████╔╝
+╚██╗ ██╔╝██║   ██║██╔══██╗██╔══╝  ██╔═══╝ 
+ ╚████╔╝ ╚██████╔╝██║  ██║███████╗██║     
+  ╚═══╝   ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝     
+</pre>
 
 **Search code by meaning, not just keywords. 100% offline. Zero cloud dependencies.**
 
@@ -264,17 +264,22 @@ Output:
 
 νgrεp supports assisted installation for popular coding agents:
 
-| Command | Description |
-|---------|-------------|
-| `vgrep install-claude-code` | Install for Claude Code |
-| `vgrep install-opencode` | Install for OpenCode |
-| `vgrep install-codex` | Install for Codex |
-| `vgrep install-droid` | Install for Factory Droid |
+```bash
+vgrep install <agent>     # Install integration
+vgrep uninstall <agent>   # Remove integration
+```
+
+| Agent | Command |
+|-------|---------|
+| Claude Code | `vgrep install claude-code` |
+| OpenCode | `vgrep install opencode` |
+| Codex | `vgrep install codex` |
+| Factory Droid | `vgrep install droid` |
 
 ### Usage with Claude Code
 
 ```bash
-vgrep install-claude-code
+vgrep install claude-code
 vgrep serve   # Start server
 vgrep watch   # Index your project
 # Claude Code can now use vgrep for semantic search
@@ -283,11 +288,11 @@ vgrep watch   # Index your project
 ### Usage with Factory Droid
 
 ```bash
-vgrep install-droid
+vgrep install droid
 # vgrep auto-starts when you begin a Droid session
 ```
 
-To uninstall, use `vgrep uninstall-<agent>` (e.g., `vgrep uninstall-droid`).
+To uninstall: `vgrep uninstall <agent>` (e.g., `vgrep uninstall droid`).
 
 ---
 

@@ -134,29 +134,41 @@ enum Commands {
         action: Option<ConfigAction>,
     },
 
-    /// Install vgrep integration for Claude Code
-    InstallClaudeCode,
+    /// Install vgrep integration for coding agents
+    Install {
+        #[command(subcommand)]
+        agent: InstallAgent,
+    },
 
-    /// Uninstall vgrep from Claude Code
-    UninstallClaudeCode,
+    /// Uninstall vgrep integration from coding agents
+    Uninstall {
+        #[command(subcommand)]
+        agent: UninstallAgent,
+    },
+}
 
-    /// Install vgrep integration for OpenCode
-    InstallOpencode,
+#[derive(Subcommand)]
+enum InstallAgent {
+    /// Install for Claude Code
+    ClaudeCode,
+    /// Install for OpenCode
+    Opencode,
+    /// Install for Codex
+    Codex,
+    /// Install for Factory Droid
+    Droid,
+}
 
-    /// Uninstall vgrep from OpenCode
-    UninstallOpencode,
-
-    /// Install vgrep integration for Codex
-    InstallCodex,
-
-    /// Uninstall vgrep from Codex
-    UninstallCodex,
-
-    /// Install vgrep integration for Factory Droid
-    InstallDroid,
-
-    /// Uninstall vgrep from Factory Droid
-    UninstallDroid,
+#[derive(Subcommand)]
+enum UninstallAgent {
+    /// Uninstall from Claude Code
+    ClaudeCode,
+    /// Uninstall from OpenCode
+    Opencode,
+    /// Uninstall from Codex
+    Codex,
+    /// Uninstall from Factory Droid
+    Droid,
 }
 
 #[derive(Subcommand)]
@@ -307,14 +319,18 @@ impl Cli {
             Some(Commands::Status) => run_status(&config),
             Some(Commands::Models { action }) => run_models(action, &mut config),
             Some(Commands::Config { action }) => run_config(action, &mut config),
-            Some(Commands::InstallClaudeCode) => super::install::install_claude_code(),
-            Some(Commands::UninstallClaudeCode) => super::install::uninstall_claude_code(),
-            Some(Commands::InstallOpencode) => super::install::install_opencode(),
-            Some(Commands::UninstallOpencode) => super::install::uninstall_opencode(),
-            Some(Commands::InstallCodex) => super::install::install_codex(),
-            Some(Commands::UninstallCodex) => super::install::uninstall_codex(),
-            Some(Commands::InstallDroid) => super::install::install_droid(),
-            Some(Commands::UninstallDroid) => super::install::uninstall_droid(),
+            Some(Commands::Install { agent }) => match agent {
+                InstallAgent::ClaudeCode => super::install::install_claude_code(),
+                InstallAgent::Opencode => super::install::install_opencode(),
+                InstallAgent::Codex => super::install::install_codex(),
+                InstallAgent::Droid => super::install::install_droid(),
+            },
+            Some(Commands::Uninstall { agent }) => match agent {
+                UninstallAgent::ClaudeCode => super::install::uninstall_claude_code(),
+                UninstallAgent::Opencode => super::install::uninstall_opencode(),
+                UninstallAgent::Codex => super::install::uninstall_codex(),
+                UninstallAgent::Droid => super::install::uninstall_droid(),
+            },
             None => {
                 print_quick_help();
                 Ok(())
