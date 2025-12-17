@@ -2,7 +2,7 @@
 
 # νgrεp
 
-**Local semantic code search powered by Corτεx Foundaτion**
+**Local semantic code search**
 
 [![CI](https://github.com/CortexLM/vgrep/actions/workflows/ci.yml/badge.svg)](https://github.com/CortexLM/vgrep/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/CortexLM/vgrep)](https://github.com/CortexLM/vgrep/blob/main/LICENSE)
@@ -21,6 +21,27 @@
 **Search code by meaning, not just keywords. 100% offline. Zero cloud dependencies.**
 
 </div>
+
+---
+
+## Installation
+
+```bash
+curl -fsSL https://vgrep.dev/install.sh | sh
+```
+
+Or with wget:
+
+```bash
+wget -qO- https://vgrep.dev/install.sh | sh
+```
+
+After installation, initialize vgrep:
+
+```bash
+vgrep init
+vgrep models download
+```
 
 ---
 
