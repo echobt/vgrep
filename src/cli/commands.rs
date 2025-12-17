@@ -133,6 +133,30 @@ enum Commands {
         #[command(subcommand)]
         action: Option<ConfigAction>,
     },
+
+    /// Install vgrep integration for Claude Code
+    InstallClaudeCode,
+
+    /// Uninstall vgrep from Claude Code
+    UninstallClaudeCode,
+
+    /// Install vgrep integration for OpenCode
+    InstallOpencode,
+
+    /// Uninstall vgrep from OpenCode
+    UninstallOpencode,
+
+    /// Install vgrep integration for Codex
+    InstallCodex,
+
+    /// Uninstall vgrep from Codex
+    UninstallCodex,
+
+    /// Install vgrep integration for Factory Droid
+    InstallDroid,
+
+    /// Uninstall vgrep from Factory Droid
+    UninstallDroid,
 }
 
 #[derive(Subcommand)]
@@ -283,6 +307,14 @@ impl Cli {
             Some(Commands::Status) => run_status(&config),
             Some(Commands::Models { action }) => run_models(action, &mut config),
             Some(Commands::Config { action }) => run_config(action, &mut config),
+            Some(Commands::InstallClaudeCode) => super::install::install_claude_code(),
+            Some(Commands::UninstallClaudeCode) => super::install::uninstall_claude_code(),
+            Some(Commands::InstallOpencode) => super::install::install_opencode(),
+            Some(Commands::UninstallOpencode) => super::install::uninstall_opencode(),
+            Some(Commands::InstallCodex) => super::install::install_codex(),
+            Some(Commands::UninstallCodex) => super::install::uninstall_codex(),
+            Some(Commands::InstallDroid) => super::install::install_droid(),
+            Some(Commands::UninstallDroid) => super::install::uninstall_droid(),
             None => {
                 print_quick_help();
                 Ok(())

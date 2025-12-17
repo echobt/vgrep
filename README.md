@@ -260,6 +260,37 @@ Output:
 
 ---
 
+## Agent Integrations
+
+νgrεp supports assisted installation for popular coding agents:
+
+| Command | Description |
+|---------|-------------|
+| `vgrep install-claude-code` | Install for Claude Code |
+| `vgrep install-opencode` | Install for OpenCode |
+| `vgrep install-codex` | Install for Codex |
+| `vgrep install-droid` | Install for Factory Droid |
+
+### Usage with Claude Code
+
+```bash
+vgrep install-claude-code
+vgrep serve   # Start server
+vgrep watch   # Index your project
+# Claude Code can now use vgrep for semantic search
+```
+
+### Usage with Factory Droid
+
+```bash
+vgrep install-droid
+# vgrep auto-starts when you begin a Droid session
+```
+
+To uninstall, use `vgrep uninstall-<agent>` (e.g., `vgrep uninstall-droid`).
+
+---
+
 ## How It Works
 
 ### Embedding Generation

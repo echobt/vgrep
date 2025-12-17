@@ -1,6 +1,7 @@
 //! Command-line interface.
 
 mod commands;
+pub mod install;
 mod interactive;
 
 pub use commands::Cli;
