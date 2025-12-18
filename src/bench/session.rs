@@ -30,6 +30,7 @@ pub struct TmuxSession {
     width: u32,
     height: u32,
     started: bool,
+    last_output: Option<String>,
 }
 
 impl TmuxSession {
@@ -41,7 +42,18 @@ impl TmuxSession {
             width: 160,
             height: 40,
             started: false,
+            last_output: None,
         }
+    }
+    
+    /// Set the last command output (for non-interactive execution)
+    pub fn set_last_output(&mut self, output: String) {
+        self.last_output = Some(output);
+    }
+    
+    /// Get and clear the last output
+    pub fn take_last_output(&mut self) -> Option<String> {
+        self.last_output.take()
     }
 
     /// Set terminal dimensions

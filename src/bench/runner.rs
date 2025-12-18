@@ -195,11 +195,15 @@ impl TrialRunner {
             steps += 1;
             debug!("Step {}", steps);
 
-            // Capture screen
-            let screen = session
-                .get_screen()
-                .await
-                .unwrap_or_else(|e| format!("Error capturing screen: {}", e));
+            // Get screen: use last command output if available, otherwise capture tmux pane
+            let screen = if let Some(output) = session.take_last_output() {
+                output
+            } else {
+                session
+                    .get_screen()
+                    .await
+                    .unwrap_or_else(|e| format!("Error capturing screen: {}", e))
+            };
 
             // Get agent response
             let response = match agent.step(&instruction, &screen, steps).await {
@@ -220,6 +224,8 @@ impl TrialRunner {
 
             // Execute commands non-interactively (handles heredocs, multi-line)
             let commands = response.get_commands();
+            let mut last_output = String::new();
+            
             if !commands.is_empty() {
                 info!(">>> Executing {} command(s):", commands.len());
             }
@@ -233,7 +239,32 @@ impl TrialRunner {
                 let timeout_sec = cmd.duration.max(120.0); // Min 120s for complex commands
                 match session.run_command_non_interactive(cmd_str, timeout_sec).await {
                     Ok(output) => {
-                        // Log output
+                        // Build output string for agent
+                        let mut cmd_output = format!("$ {}\n", cmd_str);
+                        if !output.stdout.is_empty() {
+                            cmd_output.push_str(&output.stdout);
+                            if !output.stdout.ends_with('\n') {
+                                cmd_output.push('\n');
+                            }
+                        }
+                        if !output.stderr.is_empty() {
+                            cmd_output.push_str(&output.stderr);
+                            if !output.stderr.ends_with('\n') {
+                                cmd_output.push('\n');
+                            }
+                        }
+                        if let Some(code) = output.exit_code {
+                            if code != 0 {
+                                cmd_output.push_str(&format!("[exit code: {}]\n", code));
+                                warn!("  exit code: {}", code);
+                            }
+                        }
+                        if output.timed_out {
+                            cmd_output.push_str(&format!("[Command timed out after {}s]\n", timeout_sec));
+                            warn!("  Command timed out after {}s", timeout_sec);
+                        }
+                        
+                        // Log output preview
                         if !output.stdout.is_empty() {
                             let preview = output.stdout.chars().take(500).collect::<String>();
                             info!("  stdout: {}{}", preview, if output.stdout.len() > 500 { "..." } else { "" });
@@ -242,19 +273,21 @@ impl TrialRunner {
                             let preview = output.stderr.chars().take(200).collect::<String>();
                             info!("  stderr: {}{}", preview, if output.stderr.len() > 200 { "..." } else { "" });
                         }
-                        if let Some(code) = output.exit_code {
-                            if code != 0 {
-                                warn!("  exit code: {}", code);
-                            }
-                        }
-                        if output.timed_out {
-                            warn!("  Command timed out after {}s", timeout_sec);
-                        }
+                        
+                        last_output.push_str(&cmd_output);
                     }
                     Err(e) => {
+                        let err_msg = format!("$ {}\n[Error: {}]\n", cmd_str, e);
+                        last_output.push_str(&err_msg);
                         warn!("  Command error: {}", e);
                     }
                 }
+            }
+            
+            // Update screen with command outputs for next step
+            if !last_output.is_empty() {
+                // Store in session for next get_screen() call
+                session.set_last_output(last_output);
             }
 
             // Check if agent completed (AFTER executing commands)
