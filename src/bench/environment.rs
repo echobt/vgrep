@@ -113,26 +113,31 @@ impl DockerEnvironment {
         // Prepare mounts
         let mut mounts = vec![];
 
-        // Mount tests directory
+        // Mount tests directory (must be absolute path for Docker)
         let tests_dir = self.task.tests_dir();
         if tests_dir.exists() {
+            let abs_tests_dir = tests_dir.canonicalize()
+                .with_context(|| format!("Failed to resolve tests dir: {}", tests_dir.display()))?;
             mounts.push(Mount {
                 target: Some("/tests".to_string()),
-                source: Some(tests_dir.to_string_lossy().to_string()),
+                source: Some(abs_tests_dir.to_string_lossy().to_string()),
                 typ: Some(MountTypeEnum::BIND),
                 read_only: Some(true),
                 ..Default::default()
             });
         }
 
-        // Create and mount logs directory
+        // Create and mount logs directory (must be absolute path for Docker)
         std::fs::create_dir_all(&self.logs_dir)?;
         let verifier_logs = self.logs_dir.join("verifier");
         std::fs::create_dir_all(&verifier_logs)?;
+        
+        let abs_logs_dir = self.logs_dir.canonicalize()
+            .with_context(|| format!("Failed to resolve logs dir: {}", self.logs_dir.display()))?;
 
         mounts.push(Mount {
             target: Some("/logs".to_string()),
-            source: Some(self.logs_dir.to_string_lossy().to_string()),
+            source: Some(abs_logs_dir.to_string_lossy().to_string()),
             typ: Some(MountTypeEnum::BIND),
             read_only: Some(false),
             ..Default::default()
