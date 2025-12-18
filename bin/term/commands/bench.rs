@@ -15,25 +15,12 @@ use term_challenge::bench::{
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-/// Global container tracker for cleanup on Ctrl+C
-static ACTIVE_CONTAINERS: std::sync::OnceLock<Arc<Mutex<Vec<String>>>> = std::sync::OnceLock::new();
-
-fn get_container_tracker() -> Arc<Mutex<Vec<String>>> {
-    ACTIVE_CONTAINERS
-        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
-        .clone()
-}
-
-/// Cleanup all active containers
+/// Cleanup all bench containers on Ctrl+C
 async fn cleanup_containers() {
-    let tracker = get_container_tracker();
-    let containers = tracker.lock().await;
+    use bollard::container::ListContainersOptions;
+    use std::collections::HashMap;
     
-    if containers.is_empty() {
-        return;
-    }
-    
-    eprintln!("\n\n  🧹 Cleaning up {} container(s)...", containers.len());
+    eprintln!("\n\n  🧹 Cleaning up bench containers...");
     
     let docker = match bollard::Docker::connect_with_local_defaults() {
         Ok(d) => d,
@@ -43,22 +30,50 @@ async fn cleanup_containers() {
         }
     };
     
-    for container_id in containers.iter() {
-        // Stop with 5 second timeout
-        let options = bollard::container::StopContainerOptions { t: 5 };
-        if let Err(e) = docker.stop_container(container_id, Some(options)).await {
-            warn!("Failed to stop container {}: {}", container_id, e);
+    // List all containers with term-bench prefix
+    let mut filters = HashMap::new();
+    filters.insert("name", vec!["term-bench-"]);
+    
+    let options = ListContainersOptions {
+        all: true,
+        filters,
+        ..Default::default()
+    };
+    
+    let containers = match docker.list_containers(Some(options)).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("  ⚠️  Failed to list containers: {}", e);
+            return;
         }
-        
-        // Remove container
-        let rm_options = bollard::container::RemoveContainerOptions {
-            force: true,
-            ..Default::default()
-        };
-        if let Err(e) = docker.remove_container(container_id, Some(rm_options)).await {
-            warn!("Failed to remove container {}: {}", container_id, e);
-        } else {
-            eprintln!("  ✓ Removed: {}", &container_id[..12]);
+    };
+    
+    if containers.is_empty() {
+        eprintln!("  No bench containers to clean up.");
+        return;
+    }
+    
+    eprintln!("  Found {} container(s) to clean up", containers.len());
+    
+    for container in containers {
+        if let Some(id) = container.id {
+            let name = container.names.as_ref()
+                .and_then(|n| n.first())
+                .map(|s| s.trim_start_matches('/'))
+                .unwrap_or(&id[..12]);
+            
+            // Stop with 5 second timeout
+            let options = bollard::container::StopContainerOptions { t: 5 };
+            let _ = docker.stop_container(&id, Some(options)).await;
+            
+            // Remove container
+            let rm_options = bollard::container::RemoveContainerOptions {
+                force: true,
+                ..Default::default()
+            };
+            if docker.remove_container(&id, Some(rm_options)).await.is_ok() {
+                eprintln!("  ✓ Removed: {}", name);
+            }
         }
     }
 }
@@ -324,7 +339,6 @@ pub async fn run_benchmark(
     let total_cost = Arc::new(Mutex::new(0.0f64));
     let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let semaphore = Arc::new(Semaphore::new(concurrent));
-    let container_tracker = get_container_tracker();
 
     // Spawn concurrent tasks
     let mut handles = Vec::new();
@@ -338,7 +352,6 @@ pub async fn run_benchmark(
         let bench_dir = bench_dir.clone();
         let api_key = api_key.map(String::from);
         let model = model.map(String::from);
-        let container_tracker = container_tracker.clone();
         let cleanup_flag = cleanup_flag.clone();
         
         let handle = tokio::spawn(async move {
@@ -398,9 +411,6 @@ pub async fn run_benchmark(
             };
 
             let runner = TrialRunner::new(config);
-            
-            // Track container for cleanup (runner will set this)
-            // Note: The runner's environment will be tracked internally
             
             match runner.run(&task, &agent).await {
                 Ok(trial_result) => {
