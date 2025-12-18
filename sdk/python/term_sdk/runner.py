@@ -18,7 +18,8 @@ def run(agent: Agent) -> None:
     """
     Run an agent in the Term Challenge harness.
     
-    This reads requests from stdin and writes responses to stdout.
+    This reads requests from stdin (line by line) and writes responses to stdout.
+    The agent process stays alive between steps, preserving memory/state.
     
     Args:
         agent: Your agent instance
@@ -36,35 +37,50 @@ def run(agent: Agent) -> None:
         ```
     """
     try:
-        # Setup
+        # Setup once at start
         agent.setup()
         
-        # Read single request from stdin
-        input_data = sys.stdin.read().strip()
-        if not input_data:
-            log("No input received")
-            return
+        # Read requests line by line (allows persistent process)
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            
+            try:
+                # Parse request
+                request = Request.parse(line)
+                log(f"Step {request.step}: {request.instruction[:50]}...")
+                
+                # Solve
+                response = agent.solve(request)
+                
+                # Output response (single line JSON)
+                print(response.to_json(), flush=True)
+                
+                # If task complete, we can exit
+                if response.task_complete:
+                    break
+                    
+            except json.JSONDecodeError as e:
+                log(f"Invalid JSON: {e}")
+                print(Response.done().to_json(), flush=True)
+                break
+            except Exception as e:
+                log(f"Error in step: {e}")
+                traceback.print_exc(file=sys.stderr)
+                print(Response.done().to_json(), flush=True)
+                break
         
-        # Parse request
-        request = Request.parse(input_data)
-        log(f"Step {request.step}: {request.instruction[:50]}...")
-        
-        # Solve
-        response = agent.solve(request)
-        
-        # Output response
-        print(response.to_json(), flush=True)
-        
-        # Cleanup
+        # Cleanup when done
         agent.cleanup()
         
-    except json.JSONDecodeError as e:
-        log(f"Invalid JSON: {e}")
-        print(Response.done().to_json())
+    except KeyboardInterrupt:
+        log("Interrupted")
+        agent.cleanup()
     except Exception as e:
-        log(f"Error: {e}")
+        log(f"Fatal error: {e}")
         traceback.print_exc(file=sys.stderr)
-        print(Response.done().to_json())
+        print(Response.done().to_json(), flush=True)
 
 
 def run_loop(agent: Agent) -> None:

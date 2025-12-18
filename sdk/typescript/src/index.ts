@@ -188,28 +188,57 @@ function log(msg: string): void {
   console.error(`[agent] ${msg}`);
 }
 
+/**
+ * Run an agent in the Term Challenge harness.
+ * 
+ * Reads requests from stdin (line by line), calls agent.solve(), writes response to stdout.
+ * The agent process stays alive between steps, preserving memory/state.
+ */
 export async function run(agent: Agent): Promise<void> {
   try {
+    // Setup once at start
     if (agent.setup) await agent.setup();
-    const input = await readStdin();
-    if (!input) { log("No input"); console.log(Response.done().toJSON()); return; }
-    let request: Request;
-    try { request = Request.parse(input); } catch (e) { log(`Invalid JSON: ${e}`); console.log(Response.done().toJSON()); return; }
-    log(`Step ${request.step}: ${request.instruction.slice(0, 50)}...`);
-    const response = await agent.solve(request);
-    console.log(response.toJSON());
+    
+    // Read requests line by line (allows persistent process)
+    const readline = await import('readline');
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      terminal: false
+    });
+    
+    for await (const line of rl) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      
+      try {
+        // Parse request
+        const request = Request.parse(trimmed);
+        log(`Step ${request.step}: ${request.instruction.slice(0, 50)}...`);
+        
+        // Solve
+        const response = await agent.solve(request);
+        
+        // Output (single line JSON)
+        console.log(response.toJSON());
+        
+        // If task complete, exit
+        if (response.taskComplete) break;
+        
+      } catch (e) {
+        log(`Error in step: ${e}`);
+        console.log(Response.done().toJSON());
+        break;
+      }
+    }
+    
+    // Cleanup when done
     if (agent.cleanup) await agent.cleanup();
-  } catch (e) { log(`Error: ${e}`); console.log(Response.done().toJSON()); }
-}
-
-async function readStdin(): Promise<string> {
-  return new Promise((resolve) => {
-    let data = '';
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (chunk) => { data += chunk; });
-    process.stdin.on('end', () => resolve(data.trim()));
-    setTimeout(() => { if (!data) resolve(''); }, 100);
-  });
+    
+  } catch (e) {
+    log(`Fatal error: ${e}`);
+    console.log(Response.done().toJSON());
+  }
 }
 
 // ============================================================================

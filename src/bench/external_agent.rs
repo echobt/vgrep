@@ -16,12 +16,48 @@ use tracing::{debug, error, info, warn};
 use super::runner::Agent;
 use super::session::{AgentResponse, CommandSpec, TmuxSession};
 
-/// Request sent to external agent
+/// Request sent to external agent (matches SDK Request format)
 #[derive(Debug, Serialize)]
 pub struct AgentRequest {
     pub instruction: String,
-    pub screen: String,
     pub step: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default = "default_cwd")]
+    pub cwd: String,
+}
+
+fn default_cwd() -> String {
+    "/app".to_string()
+}
+
+impl AgentRequest {
+    pub fn new(instruction: String, step: u32) -> Self {
+        Self {
+            instruction,
+            step,
+            last_command: None,
+            output: None,
+            exit_code: None,
+            cwd: "/app".to_string(),
+        }
+    }
+    
+    pub fn with_output(mut self, last_command: Option<String>, output: Option<String>, exit_code: Option<i32>) -> Self {
+        self.last_command = last_command;
+        self.output = output;
+        self.exit_code = exit_code;
+        self
+    }
+    
+    pub fn with_cwd(mut self, cwd: String) -> Self {
+        self.cwd = cwd;
+        self
+    }
 }
 
 /// Language/runtime for external agent
@@ -244,6 +280,7 @@ impl ExternalAgent {
         stdin.write_all(request_json.as_bytes()).await?;
         stdin.write_all(b"\n").await?;
         stdin.flush().await?;
+        // Note: stdin stays open - SDK now reads line by line, not until EOF
 
         // Read response (single line JSON)
         let mut reader = BufReader::new(stdout);
@@ -350,11 +387,14 @@ impl Agent for ExternalAgent {
     }
 
     async fn step(&self, instruction: &str, screen: &str, step: u32) -> Result<AgentResponse> {
-        let request = AgentRequest {
-            instruction: instruction.to_string(),
-            screen: screen.to_string(),
-            step,
-        };
+        // Map screen to output for SDK compatibility
+        // The SDK expects: instruction, step, last_command, output, exit_code, cwd
+        let request = AgentRequest::new(instruction.to_string(), step)
+            .with_output(
+                None, // last_command not available in bench harness
+                if screen.is_empty() { None } else { Some(screen.to_string()) },
+                Some(0), // Assume success for screen output
+            );
 
         self.communicate(&request).await
     }
