@@ -2,6 +2,8 @@
 
 use anyhow::Result;
 use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::{Mutex, Semaphore};
 use term_challenge::bench::{
     create_agent,
     llm::Provider,
@@ -10,8 +12,56 @@ use term_challenge::bench::{
     runner::{Agent, TrialConfig, TrialRunner},
     task::Task,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
+
+/// Global container tracker for cleanup on Ctrl+C
+static ACTIVE_CONTAINERS: std::sync::OnceLock<Arc<Mutex<Vec<String>>>> = std::sync::OnceLock::new();
+
+fn get_container_tracker() -> Arc<Mutex<Vec<String>>> {
+    ACTIVE_CONTAINERS
+        .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
+        .clone()
+}
+
+/// Cleanup all active containers
+async fn cleanup_containers() {
+    let tracker = get_container_tracker();
+    let containers = tracker.lock().await;
+    
+    if containers.is_empty() {
+        return;
+    }
+    
+    eprintln!("\n\n  🧹 Cleaning up {} container(s)...", containers.len());
+    
+    let docker = match bollard::Docker::connect_with_local_defaults() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("  ⚠️  Failed to connect to Docker: {}", e);
+            return;
+        }
+    };
+    
+    for container_id in containers.iter() {
+        // Stop with 5 second timeout
+        let options = bollard::container::StopContainerOptions { t: 5 };
+        if let Err(e) = docker.stop_container(container_id, Some(options)).await {
+            warn!("Failed to stop container {}: {}", container_id, e);
+        }
+        
+        // Remove container
+        let rm_options = bollard::container::RemoveContainerOptions {
+            force: true,
+            ..Default::default()
+        };
+        if let Err(e) = docker.remove_container(container_id, Some(rm_options)).await {
+            warn!("Failed to remove container {}: {}", container_id, e);
+        } else {
+            eprintln!("  ✓ Removed: {}", &container_id[..12]);
+        }
+    }
+}
 
 /// List available datasets
 pub async fn list_datasets() -> Result<()> {
@@ -227,7 +277,8 @@ pub async fn run_benchmark(
         task_paths
     };
 
-    println!("  Tasks:      {}", task_paths.len());
+    let total_tasks = task_paths.len();
+    println!("  Tasks:      {}", total_tasks);
     println!("  Concurrent: {}", concurrent);
     println!("  Max steps:  {}", max_steps);
     println!("  Timeout:    {}x\n", timeout_multiplier);
@@ -250,105 +301,170 @@ pub async fn run_benchmark(
     std::fs::create_dir_all(&bench_dir)?;
 
     let model_name = model.unwrap_or(provider.default_model());
-    let mut results = BenchmarkResults::new(
+    
+    // Setup Ctrl+C handler
+    let cleanup_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cleanup_flag_clone = cleanup_flag.clone();
+    
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            cleanup_flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            cleanup_containers().await;
+            std::process::exit(130);
+        }
+    });
+
+    // Shared state for concurrent execution
+    let results = Arc::new(Mutex::new(BenchmarkResults::new(
         &bench_name,
         &format!("{}@{}", name, version),
         &format!("{}/{}", provider, model_name),
         Some(model_name),
-    );
+    )));
+    let total_cost = Arc::new(Mutex::new(0.0f64));
+    let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let semaphore = Arc::new(Semaphore::new(concurrent));
+    let container_tracker = get_container_tracker();
 
-    let mut total_cost = 0.0f64;
-
-    // Run tasks sequentially (concurrent execution available via --concurrent flag)
-    for (i, task_path) in task_paths.iter().enumerate() {
-        let task = match Task::from_path(task_path) {
-            Ok(t) => t,
-            Err(e) => {
-                error!("Failed to load task {:?}: {}", task_path, e);
-                continue;
+    // Spawn concurrent tasks
+    let mut handles = Vec::new();
+    
+    for (i, task_path) in task_paths.into_iter().enumerate() {
+        let semaphore = semaphore.clone();
+        let results = results.clone();
+        let total_cost = total_cost.clone();
+        let completed = completed.clone();
+        let bench_name = bench_name.clone();
+        let bench_dir = bench_dir.clone();
+        let api_key = api_key.map(String::from);
+        let model = model.map(String::from);
+        let container_tracker = container_tracker.clone();
+        let cleanup_flag = cleanup_flag.clone();
+        
+        let handle = tokio::spawn(async move {
+            // Acquire semaphore permit
+            let _permit = semaphore.acquire().await.unwrap();
+            
+            // Check if cleanup was requested
+            if cleanup_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
             }
-        };
+            
+            let task = match Task::from_path(&task_path) {
+                Ok(t) => t,
+                Err(e) => {
+                    error!("Failed to load task {:?}: {}", task_path, e);
+                    return;
+                }
+            };
 
-        if !task.is_valid() {
-            error!("Task {} is missing required files", task.name);
-            continue;
-        }
-
-        println!("  [{}/{}] Running: {}", i + 1, task_paths.len(), task.name);
-
-        // Create fresh agent for each task (reset conversation, cost tracking)
-        let agent = match create_agent(provider, model, api_key, budget) {
-            Ok(a) => a,
-            Err(e) => {
-                error!("Failed to create agent: {}", e);
-                results.add_result(TaskResult {
-                    task_name: task.name.clone(),
-                    success: false,
-                    reward: 0.0,
-                    duration_sec: 0.0,
-                    steps: 0,
-                    error: Some(format!("Agent creation failed: {}", e)),
-                    trial_name: bench_name.clone(),
-                });
-                continue;
+            if !task.is_valid() {
+                error!("Task {} is missing required files", task.name);
+                return;
             }
-        };
 
-        let trial_name = format!("{}-{}", bench_name, task.name);
-        let config = TrialConfig {
-            trial_name: trial_name.clone(),
-            output_dir: bench_dir.clone(),
-            max_steps,
-            timeout_multiplier,
-            force_build: false,
-            delete_container: true,
-            agent_provider: Some(provider.to_string()),
-            model_name: model.map(String::from),
-        };
+            let task_num = completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            println!("  [{}/{}] Running: {}", task_num, total_tasks, task.name);
 
-        let runner = TrialRunner::new(config);
+            // Create fresh agent for each task
+            let agent = match create_agent(provider, model.as_deref(), api_key.as_deref(), budget) {
+                Ok(a) => a,
+                Err(e) => {
+                    error!("Failed to create agent: {}", e);
+                    let mut results = results.lock().await;
+                    results.add_result(TaskResult {
+                        task_name: task.name.clone(),
+                        success: false,
+                        reward: 0.0,
+                        duration_sec: 0.0,
+                        steps: 0,
+                        error: Some(format!("Agent creation failed: {}", e)),
+                        trial_name: bench_name.clone(),
+                    });
+                    return;
+                }
+            };
 
-        match runner.run(&task, &agent).await {
-            Ok(trial_result) => {
-                let status = if trial_result.success() { "✓" } else { "✗" };
-                let cost = agent.cost_tracker();
-                total_cost += cost.total_cost_usd;
+            let trial_name = format!("{}-{}", bench_name, task.name);
+            let config = TrialConfig {
+                trial_name: trial_name.clone(),
+                output_dir: bench_dir.clone(),
+                max_steps,
+                timeout_multiplier,
+                force_build: false,
+                delete_container: true,
+                agent_provider: Some(provider.to_string()),
+                model_name: model.clone(),
+            };
 
-                println!(
-                    "         {} reward={:.4} steps={} time={:.1}s cost=${:.4}",
-                    status,
-                    trial_result.reward(),
-                    trial_result.steps,
-                    trial_result.duration_sec,
-                    cost.total_cost_usd
-                );
-                results.add_result(TaskResult::from(trial_result));
+            let runner = TrialRunner::new(config);
+            
+            // Track container for cleanup (runner will set this)
+            // Note: The runner's environment will be tracked internally
+            
+            match runner.run(&task, &agent).await {
+                Ok(trial_result) => {
+                    let status = if trial_result.success() { "✓" } else { "✗" };
+                    let cost = agent.cost_tracker();
+                    
+                    {
+                        let mut tc = total_cost.lock().await;
+                        *tc += cost.total_cost_usd;
+                    }
+
+                    println!(
+                        "  [{}/{}] {} {} reward={:.4} steps={} time={:.1}s cost=${:.4}",
+                        task_num, total_tasks,
+                        status,
+                        task.name,
+                        trial_result.reward(),
+                        trial_result.steps,
+                        trial_result.duration_sec,
+                        cost.total_cost_usd
+                    );
+                    
+                    let mut results = results.lock().await;
+                    results.add_result(TaskResult::from(trial_result));
+                }
+                Err(e) => {
+                    println!("  [{}/{}] ✗ {} error: {}", task_num, total_tasks, task.name, e);
+                    let mut results = results.lock().await;
+                    results.add_result(TaskResult {
+                        task_name: task.name.clone(),
+                        success: false,
+                        reward: 0.0,
+                        duration_sec: 0.0,
+                        steps: 0,
+                        error: Some(e.to_string()),
+                        trial_name: trial_name.clone(),
+                    });
+                }
             }
-            Err(e) => {
-                println!("         ✗ error: {}", e);
-                results.add_result(TaskResult {
-                    task_name: task.name.clone(),
-                    success: false,
-                    reward: 0.0,
-                    duration_sec: 0.0,
-                    steps: 0,
-                    error: Some(e.to_string()),
-                    trial_name: trial_name.clone(),
-                });
-            }
-        }
+        });
+        
+        handles.push(handle);
     }
 
-    results.complete();
+    // Wait for all tasks to complete
+    for handle in handles {
+        let _ = handle.await;
+    }
 
-    // Export results
-    let exporter = ResultExporter::new(&bench_dir);
-    exporter.export_all(&results)?;
+    // Finalize results
+    {
+        let mut results_guard = results.lock().await;
+        results_guard.complete();
 
-    // Print summary
-    print_results(&results);
+        // Export results
+        let exporter = ResultExporter::new(&bench_dir);
+        exporter.export_all(&results_guard)?;
 
-    println!("\n  💰 Total Cost: ${:.4}", total_cost);
+        // Print summary
+        print_results(&results_guard);
+    }
+
+    let final_cost = *total_cost.lock().await;
+    println!("\n  💰 Total Cost: ${:.4}", final_cost);
     println!("  📁 Results saved to: {}\n", bench_dir.display());
 
     Ok(())
