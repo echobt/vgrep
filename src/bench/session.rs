@@ -115,32 +115,16 @@ impl TmuxSession {
     }
     
     /// Execute a command non-interactively (handles heredocs, multi-line commands)
-    /// Writes command to a temp script and executes it with stdin redirected from /dev/null
+    /// Uses bash -c with stdin from /dev/null to prevent interactive prompts
     pub async fn run_command_non_interactive(&self, command: &str, timeout_sec: f64) -> Result<ExecOutput> {
-        // Create unique script filename
-        let script_name = format!("/tmp/cmd_{}.sh", uuid::Uuid::new_v4());
-        
-        // Write the command to a script file
-        let script_content = format!(
-            "#!/bin/bash\nset -e\ncd /app\nexport DEBIAN_FRONTEND=noninteractive\n{}\n",
+        // Build command with non-interactive settings
+        // Use bash -c to execute, with stdin from /dev/null
+        let full_cmd = format!(
+            "cd /app && export DEBIAN_FRONTEND=noninteractive && {} < /dev/null",
             command
         );
         
-        // Escape for shell
-        let escaped_content = script_content.replace('\\', "\\\\").replace('"', "\\\"").replace('$', "\\$").replace('`', "\\`");
-        
-        // Create the script
-        let create_cmd = format!("printf \"%s\" \"{}\" > {} && chmod +x {}", escaped_content, script_name, script_name);
-        self.env.exec_command(&create_cmd, Some(5.0)).await?;
-        
-        // Execute with stdin from /dev/null (non-interactive)
-        let exec_cmd = format!("bash {} < /dev/null 2>&1", script_name);
-        let result = self.env.exec_command(&exec_cmd, Some(timeout_sec)).await;
-        
-        // Cleanup
-        let _ = self.env.exec_command(&format!("rm -f {}", script_name), Some(2.0)).await;
-        
-        result
+        self.env.exec_command(&full_cmd, Some(timeout_sec)).await
     }
 
     /// Send a command and wait for completion using tmux wait
