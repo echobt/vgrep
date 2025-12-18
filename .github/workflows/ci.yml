@@ -18,6 +18,11 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -44,6 +49,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -94,6 +104,11 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -124,11 +139,14 @@ jobs:
       contents: read
       packages: write
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h
+
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
