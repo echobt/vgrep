@@ -244,11 +244,28 @@ fn render_select_agent(frame: &mut Frame, area: Rect, state: &WizardState) {
         );
     frame.render_widget(dir_para, chunks[0]);
 
-    // File list
+    // Calculate visible area (subtract 2 for borders)
+    let visible_height = chunks[1].height.saturating_sub(2) as usize;
+    let total_items = state.dir_entries.len();
+    
+    // Calculate scroll offset to keep selected item visible
+    let scroll_offset = if total_items == 0 {
+        0
+    } else if state.selected_index >= state.scroll_offset + visible_height {
+        state.selected_index.saturating_sub(visible_height - 1)
+    } else if state.selected_index < state.scroll_offset {
+        state.selected_index
+    } else {
+        state.scroll_offset
+    };
+
+    // Create visible items only
     let items: Vec<ListItem> = state
         .dir_entries
         .iter()
         .enumerate()
+        .skip(scroll_offset)
+        .take(visible_height)
         .map(|(i, path)| {
             let name = path
                 .file_name()
@@ -271,20 +288,53 @@ fn render_select_agent(frame: &mut Frame, area: Rect, state: &WizardState) {
         })
         .collect();
 
+    // Show scroll indicator in title if needed
+    let title = if total_items > visible_height {
+        format!(
+            " Select Agent File (.py) [{}-{}/{}] ",
+            scroll_offset + 1,
+            (scroll_offset + visible_height).min(total_items),
+            total_items
+        )
+    } else {
+        " Select Agent File (.py) ".to_string()
+    };
+
     let list = List::new(items)
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Select Agent File (.py) ")
+                .title(title)
                 .border_style(Style::default().fg(PRIMARY)),
         )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
     frame.render_widget(list, chunks[1]);
 
+    // Render scrollbar if needed
+    if total_items > visible_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+
+        let mut scrollbar_state = ScrollbarState::new(total_items)
+            .position(state.selected_index);
+
+        frame.render_stateful_widget(
+            scrollbar,
+            chunks[1].inner(ratatui::layout::Margin {
+                vertical: 1,
+                horizontal: 0,
+            }),
+            &mut scrollbar_state,
+        );
+    }
+
     // Filter input
     let filter_text = if state.file_filter.is_empty() {
-        "Type to filter...".to_string()
+        "Type to filter... (↑/↓ scroll, PgUp/PgDn jump)".to_string()
     } else {
         state.file_filter.clone()
     };

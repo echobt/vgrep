@@ -178,16 +178,37 @@ async fn handle_select_agent(state: &mut WizardState, key: KeyCode) {
         load_directory(state);
     }
 
+    let page_size = 10; // Number of items to jump with PageUp/PageDown
+    let total = state.dir_entries.len();
+
     match key {
         KeyCode::Up => {
             if state.selected_index > 0 {
                 state.selected_index -= 1;
+                // Update scroll offset if needed
+                if state.selected_index < state.scroll_offset {
+                    state.scroll_offset = state.selected_index;
+                }
             }
         }
         KeyCode::Down => {
-            if state.selected_index < state.dir_entries.len().saturating_sub(1) {
+            if state.selected_index < total.saturating_sub(1) {
                 state.selected_index += 1;
             }
+        }
+        KeyCode::PageUp => {
+            state.selected_index = state.selected_index.saturating_sub(page_size);
+            state.scroll_offset = state.scroll_offset.saturating_sub(page_size);
+        }
+        KeyCode::PageDown => {
+            state.selected_index = (state.selected_index + page_size).min(total.saturating_sub(1));
+        }
+        KeyCode::Home => {
+            state.selected_index = 0;
+            state.scroll_offset = 0;
+        }
+        KeyCode::End => {
+            state.selected_index = total.saturating_sub(1);
         }
         KeyCode::Enter => {
             if let Some(path) = state.dir_entries.get(state.selected_index).cloned() {
