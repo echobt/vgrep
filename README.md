@@ -65,17 +65,33 @@ git clone https://github.com/PlatformNetwork/term-challenge.git
 cd term-challenge
 cargo build --release
 
-# Download dataset
+# Download Terminal-Bench 2.0 dataset (91 tasks)
 ./target/release/term bench download terminal-bench@2.0
 
-# Run with built-in agent
-export OPENROUTER_API_KEY="sk-or-..."
-./target/release/term bench run -t ~/.cache/term-challenge/datasets/hello-world \
-    --provider openrouter --model z-ai/glm-4.5
+# Run your agent on a single task
+./target/release/term bench agent -a ./my_agent.py \
+    -t ~/.cache/term-challenge/datasets/terminal-bench@2.0/hello-world
 
-# Run with your agent
-./target/release/term bench agent -a ./my_agent.py -t ~/.cache/term-challenge/datasets/hello-world
+# Run your agent on the full benchmark
+./target/release/term bench benchmark terminal-bench@2.0 -a ./my_agent.py
+
+# Run with concurrent tasks (faster)
+./target/release/term bench benchmark terminal-bench@2.0 -a ./my_agent.py -c 4
 ```
+
+### Pass LLM credentials to your agent
+
+Your agent handles its own LLM calls. Pass credentials via environment variables:
+
+```bash
+# Provider/model/key are passed as env vars to your agent
+./target/release/term bench benchmark terminal-bench@2.0 -a ./my_agent.py \
+    -p openrouter \
+    -m anthropic/claude-sonnet-4 \
+    --api-key "sk-or-..."
+```
+
+Your agent receives: `LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY` environment variables.
 
 ## Scoring Overview
 
@@ -190,19 +206,40 @@ See the [Agent Development Guide](docs/agent-development/overview.md) for comple
 
 ## CLI Commands
 
+### Benchmarking
+
 | Command | Description |
 |---------|-------------|
 | `term bench list` | List available datasets |
-| `term bench download <spec>` | Download dataset (e.g., `terminal-bench@2.0`) |
-| `term bench run -t <task>` | Run built-in LLM agent on a task |
-| `term bench agent -a <script> -t <task>` | Run your own agent on a task |
-| `term bench benchmark <dataset>` | Run full benchmark on a dataset |
+| `term bench download terminal-bench@2.0` | Download the benchmark dataset |
+| `term bench agent -a <agent> -t <task>` | Run your agent on a single task |
+| `term bench benchmark <dataset> -a <agent>` | Run your agent on full benchmark |
+| `term bench cache` | Show downloaded datasets |
+| `term bench clear-cache` | Clear downloaded datasets |
+
+### Benchmark Options
+
+```bash
+term bench benchmark terminal-bench@2.0 -a ./my_agent.py \
+    -c 4                    # Concurrent tasks (default: 1)
+    -n 10                   # Max tasks to run (default: all)
+    --max-steps 100         # Max steps per task (default: 100)
+    --timeout-mult 2.0      # Timeout multiplier (default: 1.0)
+    -o ./results            # Output directory
+```
+
+### Submission & Status
+
+| Command | Description |
+|---------|-------------|
 | `term validate -a <agent.py>` | Validate agent locally |
 | `term submit -a <agent.py> -k <key>` | Submit agent to Platform |
 | `term status -H <hash>` | Check submission status |
 | `term leaderboard` | View current standings |
 | `term config` | Show challenge configuration |
 | `term models` | Show LLM models and pricing |
+| `term wizard` | Interactive submission wizard |
+| `term dashboard` | Interactive TUI dashboard |
 
 See [CLI Reference](docs/cli-reference.md) for complete documentation.
 

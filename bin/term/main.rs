@@ -222,27 +222,27 @@ enum BenchCommands {
         max_steps: u32,
     },
 
-    /// Run benchmark on a dataset with LLM agent
+    /// Run benchmark on a dataset with your agent
     #[command(visible_alias = "bm")]
     Benchmark {
         /// Dataset specifier (e.g., terminal-bench@2.0)
         dataset: String,
 
-        /// LLM provider: openrouter, chutes
-        #[arg(short, long, default_value = "openrouter")]
-        provider: String,
+        /// Path to agent script (*.py, *.js, *.rs, or binary) - REQUIRED
+        #[arg(short, long)]
+        agent: std::path::PathBuf,
 
-        /// Model name (provider-specific)
+        /// LLM provider (passed as env var to agent)
+        #[arg(short, long)]
+        provider: Option<String>,
+
+        /// Model name (passed as env var to agent)
         #[arg(short, long)]
         model: Option<String>,
 
-        /// API key (or set OPENROUTER_API_KEY / CHUTES_API_KEY)
+        /// API key (passed as env var to agent)
         #[arg(long, env = "LLM_API_KEY")]
         api_key: Option<String>,
-
-        /// Maximum cost budget in USD (per task)
-        #[arg(long, default_value = "5.0")]
-        budget: f64,
 
         /// Output directory for results
         #[arg(short, long)]
@@ -377,10 +377,10 @@ async fn main() {
             }
             BenchCommands::Benchmark {
                 dataset,
+                agent,
                 provider,
                 model,
                 api_key,
-                budget,
                 output,
                 max_tasks,
                 concurrent,
@@ -389,10 +389,10 @@ async fn main() {
             } => {
                 commands::bench::run_benchmark(
                     &dataset,
-                    &provider,
+                    agent,
+                    provider.as_deref(),
                     model.as_deref(),
                     api_key.as_deref(),
-                    budget,
                     output,
                     max_tasks,
                     timeout_mult,

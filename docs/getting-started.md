@@ -68,18 +68,18 @@ term bench download terminal-bench@2.0
 term bench cache
 ```
 
-### 3. Run a Single Task
+### 3. Run Your Agent
 
 ```bash
-# Run with built-in LLM agent
-term bench run -t ~/.cache/term-challenge/datasets/hello-world \
-    --provider openrouter \
-    --model z-ai/glm-4.5
+# Run your agent on a single task
+term bench agent -a ./my_agent.py \
+    -t ~/.cache/term-challenge/datasets/terminal-bench@2.0/hello-world
 
-# With budget limit
-term bench run -t ~/.cache/term-challenge/datasets/hello-world \
-    --provider openrouter \
-    --budget 0.50
+# Run your agent on the full benchmark
+term bench benchmark terminal-bench@2.0 -a ./my_agent.py
+
+# Run with concurrent tasks (faster)
+term bench benchmark terminal-bench@2.0 -a ./my_agent.py -c 4
 ```
 
 ### 4. View Results
@@ -134,17 +134,22 @@ if __name__ == "__main__":
 ### Run Your Agent
 
 ```bash
-# Set API key
+# Set API key (your agent reads this environment variable)
 export OPENROUTER_API_KEY="sk-or-..."
 
-# Run on a task
-term bench agent -a ./my_agent.py -t ./data/tasks/hello-world
+# Run on a single task
+term bench agent -a ./my_agent.py \
+    -t ~/.cache/term-challenge/datasets/terminal-bench@2.0/hello-world
 
-# With explicit provider/model passed to agent
-term bench agent -a ./my_agent.py -t ./data/tasks/hello-world \
-    --provider openrouter \
-    --model z-ai/glm-4.5
+# Pass provider/model as env vars to your agent
+term bench agent -a ./my_agent.py \
+    -t ~/.cache/term-challenge/datasets/terminal-bench@2.0/hello-world \
+    -p openrouter \
+    -m anthropic/claude-sonnet-4 \
+    --api-key "sk-or-..."
 ```
+
+Your agent receives: `LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY` environment variables.
 
 ### Simple Agent (No LLM)
 
@@ -165,17 +170,23 @@ if __name__ == "__main__":
 ## Running a Full Benchmark
 
 ```bash
-# Run all tasks in Terminal-Bench 2.0
-term bench benchmark terminal-bench@2.0 \
-    --provider openrouter \
-    --model z-ai/glm-4.5 \
-    --budget 10.0 \
-    --max-parallel 4
+# Run your agent on all 91 tasks in Terminal-Bench 2.0
+term bench benchmark terminal-bench@2.0 -a ./my_agent.py
 
-# With your own agent
-term bench benchmark terminal-bench@2.0 \
-    -a ./my_agent.py \
-    --provider openrouter
+# Run with 4 concurrent tasks (faster)
+term bench benchmark terminal-bench@2.0 -a ./my_agent.py -c 4
+
+# Limit to first 10 tasks (for testing)
+term bench benchmark terminal-bench@2.0 -a ./my_agent.py -n 10
+
+# Pass LLM credentials to your agent
+term bench benchmark terminal-bench@2.0 -a ./my_agent.py \
+    -p openrouter \
+    -m anthropic/claude-sonnet-4 \
+    --api-key "sk-or-..."
+
+# Save results to specific directory
+term bench benchmark terminal-bench@2.0 -a ./my_agent.py -o ./my_results
 ```
 
 ## Task Structure
@@ -213,23 +224,25 @@ network = false
 | Command | Description |
 |---------|-------------|
 | `term bench list` | List available datasets |
-| `term bench download <spec>` | Download dataset |
+| `term bench download terminal-bench@2.0` | Download the benchmark dataset |
 | `term bench cache` | Show cache info |
 | `term bench clear-cache` | Clear cache |
-| `term bench run -t <task>` | Run single task |
-| `term bench benchmark <dataset>` | Run full benchmark |
-| `term bench agent -a <script> -t <task>` | Run external agent |
+| `term bench agent -a <agent> -t <task>` | Run your agent on a single task |
+| `term bench benchmark <dataset> -a <agent>` | Run your agent on full benchmark |
 
-### Options
+### Benchmark Options
 
 | Option | Description |
 |--------|-------------|
-| `--provider <name>` | LLM provider (openrouter, chutes, openai) |
-| `--model <name>` | Model to use |
-| `--budget <usd>` | Maximum cost in USD |
-| `--max-steps <n>` | Maximum steps per task (default: 50) |
-| `--max-parallel <n>` | Concurrent tasks (default: 4) |
-| `--timeout <secs>` | Task timeout override |
+| `-a, --agent <path>` | Path to your agent script (REQUIRED) |
+| `-p, --provider <name>` | LLM provider (passed as env var to agent) |
+| `-m, --model <name>` | Model name (passed as env var to agent) |
+| `--api-key <key>` | API key (passed as env var to agent) |
+| `-c, --concurrent <n>` | Number of concurrent tasks (default: 1) |
+| `-n, --max-tasks <n>` | Maximum tasks to run (default: all) |
+| `--max-steps <n>` | Maximum steps per task (default: 100) |
+| `--timeout-mult <f>` | Timeout multiplier (default: 1.0) |
+| `-o, --output <dir>` | Output directory for results |
 
 ### Platform Commands
 
@@ -244,14 +257,23 @@ network = false
 
 ## Environment Variables
 
+### Passed to Your Agent
+
+When using `-p`, `-m`, or `--api-key`, these are passed to your agent as environment variables:
+
 | Variable | Description |
 |----------|-------------|
-| `OPENROUTER_API_KEY` | OpenRouter API key |
+| `LLM_PROVIDER` | Provider name (from `-p` flag) |
+| `LLM_MODEL` | Model name (from `-m` flag) |
+| `LLM_API_KEY` | API key (from `--api-key` flag or `LLM_API_KEY` env) |
+
+### System Variables
+
+| Variable | Description |
+|----------|-------------|
+| `OPENROUTER_API_KEY` | OpenRouter API key (alternative to `--api-key`) |
 | `CHUTES_API_KEY` | Chutes API key |
-| `OPENAI_API_KEY` | OpenAI API key |
-| `ANTHROPIC_API_KEY` | Anthropic API key |
 | `TERM_CACHE_DIR` | Cache directory (default: `~/.cache/term-challenge`) |
-| `TERM_RESULTS_DIR` | Results directory (default: `./benchmark_results`) |
 
 ## Troubleshooting
 

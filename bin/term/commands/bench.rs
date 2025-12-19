@@ -259,30 +259,44 @@ pub async fn run_task(
     Ok(())
 }
 
-/// Run benchmark on a dataset with LLM agent
+/// Run benchmark on a dataset with your external agent
 #[allow(clippy::too_many_arguments)]
 pub async fn run_benchmark(
     dataset_spec: &str,
-    provider_str: &str,
+    agent_path: PathBuf,
+    provider: Option<&str>,
     model: Option<&str>,
     api_key: Option<&str>,
-    budget: f64,
     output_dir: Option<PathBuf>,
     max_tasks: Option<usize>,
     timeout_multiplier: f64,
     concurrent: usize,
     max_steps: u32,
 ) -> Result<()> {
+    use term_challenge::bench::create_external_agent;
+    
     let (name, version) = RegistryClient::parse_dataset_spec(dataset_spec);
-    let provider = Provider::parse(provider_str)?;
+
+    // Detect language from extension
+    let lang = agent_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| match e {
+            "py" => "Python",
+            "js" | "mjs" | "ts" => "JavaScript",
+            "rs" => "Rust",
+            _ => "Binary",
+        })
+        .unwrap_or("Binary");
 
     println!("\n  🏁 Starting benchmark: {}@{}\n", name, version);
-    println!("  Provider:   {}", provider);
-    println!(
-        "  Model:      {}",
-        model.unwrap_or(provider.default_model())
-    );
-    println!("  Budget:     ${:.2} per task", budget);
+    println!("  Agent:      {} ({})", agent_path.display(), lang);
+    if let Some(p) = provider {
+        println!("  Provider:   {}", p);
+    }
+    if let Some(m) = model {
+        println!("  Model:      {}", m);
+    }
 
     // Download dataset if needed
     let mut client = RegistryClient::new();
@@ -301,14 +315,13 @@ pub async fn run_benchmark(
     println!("  Timeout:    {}x\n", timeout_multiplier);
 
     let output = output_dir.unwrap_or_else(|| PathBuf::from("./benchmark_results"));
-    let model_short = model
-        .unwrap_or(provider.default_model())
-        .split('/')
-        .next_back()
-        .unwrap_or("unknown");
+    let agent_name = agent_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("agent");
     let bench_name = format!(
         "bench-{}-{}@{}-{}",
-        model_short,
+        agent_name,
         name,
         version,
         &Uuid::new_v4().as_simple().to_string()[..8]
@@ -317,7 +330,7 @@ pub async fn run_benchmark(
     let bench_dir = output.join(&bench_name);
     std::fs::create_dir_all(&bench_dir)?;
 
-    let model_name = model.unwrap_or(provider.default_model());
+    let model_name = model.unwrap_or("external");
     
     // Setup Ctrl+C handler - force kill immediately
     tokio::spawn(async move {
@@ -335,10 +348,9 @@ pub async fn run_benchmark(
     let results = Arc::new(Mutex::new(BenchmarkResults::new(
         &bench_name,
         &format!("{}@{}", name, version),
-        &format!("{}/{}", provider, model_name),
+        agent_name,
         Some(model_name),
     )));
-    let total_cost = Arc::new(Mutex::new(0.0f64));
     let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let semaphore = Arc::new(Semaphore::new(concurrent));
 
@@ -348,12 +360,13 @@ pub async fn run_benchmark(
     for task_path in task_paths.into_iter() {
         let semaphore = semaphore.clone();
         let results = results.clone();
-        let total_cost = total_cost.clone();
         let completed = completed.clone();
         let bench_name = bench_name.clone();
         let bench_dir = bench_dir.clone();
+        let agent_path = agent_path.clone();
         let api_key = api_key.map(String::from);
         let model = model.map(String::from);
+        let provider = provider.map(String::from);
         
         let handle = tokio::spawn(async move {
             // Acquire semaphore permit
@@ -375,8 +388,8 @@ pub async fn run_benchmark(
             let task_num = completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             println!("  [{}/{}] Running: {}", task_num, total_tasks, task.name);
 
-            // Create fresh agent for each task
-            let agent = match create_agent(provider, model.as_deref(), api_key.as_deref(), budget) {
+            // Create fresh external agent for each task
+            let agent = match create_external_agent(&agent_path, provider.as_deref(), api_key.as_deref(), model.as_deref()) {
                 Ok(a) => a,
                 Err(e) => {
                     error!("Failed to create agent: {}", e);
@@ -402,7 +415,7 @@ pub async fn run_benchmark(
                 timeout_multiplier,
                 force_build: false,
                 delete_container: true,
-                agent_provider: Some(provider.to_string()),
+                agent_provider: provider.clone(),
                 model_name: model.clone(),
             };
 
@@ -411,22 +424,15 @@ pub async fn run_benchmark(
             match runner.run(&task, &agent).await {
                 Ok(trial_result) => {
                     let status = if trial_result.success() { "✓" } else { "✗" };
-                    let cost = agent.cost_tracker();
-                    
-                    {
-                        let mut tc = total_cost.lock().await;
-                        *tc += cost.total_cost_usd;
-                    }
 
                     println!(
-                        "  [{}/{}] {} {} reward={:.4} steps={} time={:.1}s cost=${:.4}",
+                        "  [{}/{}] {} {} reward={:.4} steps={} time={:.1}s",
                         task_num, total_tasks,
                         status,
                         task.name,
                         trial_result.reward(),
                         trial_result.steps,
                         trial_result.duration_sec,
-                        cost.total_cost_usd
                     );
                     
                     let mut results = results.lock().await;
@@ -469,9 +475,7 @@ pub async fn run_benchmark(
         print_results(&results_guard);
     }
 
-    let final_cost = *total_cost.lock().await;
-    println!("\n  💰 Total Cost: ${:.4}", final_cost);
-    println!("  📁 Results saved to: {}\n", bench_dir.display());
+    println!("\n  📁 Results saved to: {}\n", bench_dir.display());
 
     Ok(())
 }
