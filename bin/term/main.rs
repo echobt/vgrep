@@ -222,37 +222,42 @@ enum BenchCommands {
         max_steps: u32,
     },
 
-    /// Run benchmark on a dataset with your agent
-    #[command(visible_alias = "bm")]
-    Benchmark {
-        /// Dataset specifier (e.g., terminal-bench@2.0)
-        dataset: String,
-
-        /// Path to agent script (*.py, *.js, *.rs, or binary) - REQUIRED
+    /// Run agent on task(s) - single task or full dataset benchmark
+    #[command(visible_alias = "a")]
+    Agent {
+        /// Path to agent script (*.py, *.js, *.ts, *.rs)
         #[arg(short, long)]
         agent: std::path::PathBuf,
 
-        /// LLM provider (passed as env var to agent)
-        #[arg(short, long)]
-        provider: Option<String>,
+        /// Single task directory (mutually exclusive with --dataset)
+        #[arg(short, long, conflicts_with = "dataset")]
+        task: Option<std::path::PathBuf>,
+
+        /// Dataset specifier for benchmark (e.g., terminal-bench@2.0)
+        #[arg(short, long, conflicts_with = "task")]
+        dataset: Option<String>,
+
+        /// API key for LLM provider (REQUIRED)
+        #[arg(long, env = "LLM_API_KEY")]
+        api_key: String,
+
+        /// LLM provider: openrouter, chutes (passed as env var to agent)
+        #[arg(short, long, default_value = "openrouter")]
+        provider: String,
 
         /// Model name (passed as env var to agent)
         #[arg(short, long)]
         model: Option<String>,
 
-        /// API key (passed as env var to agent)
-        #[arg(long, env = "LLM_API_KEY")]
-        api_key: Option<String>,
-
         /// Output directory for results
         #[arg(short, long)]
         output: Option<std::path::PathBuf>,
 
-        /// Maximum number of tasks to run
+        /// Maximum number of tasks (only for dataset benchmark)
         #[arg(short = 'n', long)]
         max_tasks: Option<usize>,
 
-        /// Number of concurrent tasks
+        /// Number of concurrent tasks (only for dataset benchmark)
         #[arg(short, long, default_value = "1")]
         concurrent: usize,
 
@@ -261,42 +266,6 @@ enum BenchCommands {
         timeout_mult: f64,
 
         /// Maximum agent steps per task
-        #[arg(long, default_value = "100")]
-        max_steps: u32,
-    },
-
-    /// Run external agent (Python/JavaScript/Rust) on a task
-    #[command(visible_alias = "a")]
-    Agent {
-        /// Path to agent script (*.py, *.js, *.rs, or binary)
-        #[arg(short, long)]
-        agent: std::path::PathBuf,
-
-        /// Path to task directory
-        #[arg(short, long)]
-        task: std::path::PathBuf,
-
-        /// LLM provider (passed as env var to agent)
-        #[arg(short, long)]
-        provider: Option<String>,
-
-        /// Model name (passed as env var to agent)
-        #[arg(short, long)]
-        model: Option<String>,
-
-        /// API key (passed as env var to agent)
-        #[arg(long, env = "LLM_API_KEY")]
-        api_key: Option<String>,
-
-        /// Output directory for results
-        #[arg(short, long)]
-        output: Option<std::path::PathBuf>,
-
-        /// Timeout multiplier (default: 1.0)
-        #[arg(long, default_value = "1.0")]
-        timeout_mult: f64,
-
-        /// Maximum agent steps
         #[arg(long, default_value = "100")]
         max_steps: u32,
     },
@@ -375,53 +344,58 @@ async fn main() {
                 )
                 .await
             }
-            BenchCommands::Benchmark {
-                dataset,
+            BenchCommands::Agent {
                 agent,
+                task,
+                dataset,
+                api_key,
                 provider,
                 model,
-                api_key,
                 output,
                 max_tasks,
                 concurrent,
                 timeout_mult,
                 max_steps,
             } => {
-                commands::bench::run_benchmark(
-                    &dataset,
-                    agent,
-                    provider.as_deref(),
-                    model.as_deref(),
-                    api_key.as_deref(),
-                    output,
-                    max_tasks,
-                    timeout_mult,
-                    concurrent,
-                    max_steps,
-                )
-                .await
-            }
-            BenchCommands::Agent {
-                agent,
-                task,
-                provider,
-                model,
-                api_key,
-                output,
-                timeout_mult,
-                max_steps,
-            } => {
-                commands::bench::run_external_agent(
-                    agent,
-                    task,
-                    provider.as_deref(),
-                    model.as_deref(),
-                    api_key.as_deref(),
-                    output,
-                    timeout_mult,
-                    max_steps,
-                )
-                .await
+                // Must specify either --task or --dataset
+                match (task, dataset) {
+                    (Some(task_path), None) => {
+                        // Single task mode
+                        commands::bench::run_external_agent(
+                            agent,
+                            task_path,
+                            Some(&provider),
+                            model.as_deref(),
+                            Some(&api_key),
+                            output,
+                            timeout_mult,
+                            max_steps,
+                        )
+                        .await
+                    }
+                    (None, Some(dataset_spec)) => {
+                        // Dataset benchmark mode
+                        commands::bench::run_benchmark(
+                            &dataset_spec,
+                            agent,
+                            Some(&provider),
+                            model.as_deref(),
+                            Some(&api_key),
+                            output,
+                            max_tasks,
+                            timeout_mult,
+                            concurrent,
+                            max_steps,
+                        )
+                        .await
+                    }
+                    (None, None) => {
+                        Err(anyhow::anyhow!("Either --task or --dataset is required"))
+                    }
+                    (Some(_), Some(_)) => {
+                        Err(anyhow::anyhow!("Cannot specify both --task and --dataset"))
+                    }
+                }
             }
         },
     };
