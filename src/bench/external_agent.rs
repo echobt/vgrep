@@ -206,32 +206,46 @@ impl ExternalAgent {
             return Ok(id.clone());
         }
 
-        // Check if base image exists
-        if self.docker.inspect_image(AGENT_BASE_IMAGE).await.is_err() {
-            // Try to pull the image
-            info!("Pulling agent base image: {}", AGENT_BASE_IMAGE);
-            use bollard::image::CreateImageOptions;
-            
-            let mut stream = self.docker.create_image(
-                Some(CreateImageOptions {
-                    from_image: AGENT_BASE_IMAGE,
-                    ..Default::default()
-                }),
-                None,
-                None,
-            );
-            
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok(info) => {
-                        if let Some(status) = info.status {
-                            debug!("Pull: {}", status);
+        // Always try to pull latest image (ensures miners have latest SDK)
+        info!("Checking for latest agent base image: {}", AGENT_BASE_IMAGE);
+        use bollard::image::CreateImageOptions;
+        
+        let mut stream = self.docker.create_image(
+            Some(CreateImageOptions {
+                from_image: AGENT_BASE_IMAGE,
+                ..Default::default()
+            }),
+            None,
+            None,
+        );
+        
+        let mut pull_success = false;
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(info) => {
+                    if let Some(status) = info.status {
+                        debug!("Pull: {}", status);
+                        if status.contains("up to date") || status.contains("Downloaded") || status.contains("Pull complete") {
+                            pull_success = true;
                         }
                     }
-                    Err(e) => {
-                        bail!("Failed to pull base image: {}", e);
-                    }
                 }
+                Err(e) => {
+                    // If pull fails, check if image exists locally
+                    if self.docker.inspect_image(AGENT_BASE_IMAGE).await.is_ok() {
+                        warn!("Failed to pull latest image, using cached: {}", e);
+                        pull_success = true;
+                        break;
+                    }
+                    bail!("Failed to pull base image: {}", e);
+                }
+            }
+        }
+        
+        if !pull_success {
+            // Verify image exists (either pulled or cached)
+            if self.docker.inspect_image(AGENT_BASE_IMAGE).await.is_err() {
+                bail!("Agent base image not available: {}", AGENT_BASE_IMAGE);
             }
         }
 

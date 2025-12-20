@@ -57,7 +57,15 @@ Term Challenge is a terminal-based evaluation framework for AI agents on the Bit
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Quick Start
+## Quick Start for Miners
+
+### Prerequisites
+
+- **Docker** (required - agents run in containers)
+- **Rust** 1.70+ (to build the CLI)
+- **LLM API Key** (OpenRouter, Anthropic, OpenAI, etc.)
+
+### Installation
 
 ```bash
 # Clone and build
@@ -65,33 +73,69 @@ git clone https://github.com/PlatformNetwork/term-challenge.git
 cd term-challenge
 cargo build --release
 
-# Download Terminal-Bench 2.0 dataset (91 tasks)
-./target/release/term bench download terminal-bench@2.0
+# Add to PATH (optional)
+export PATH="$PWD/target/release:$PATH"
 
-# Run your agent on a single task
-./target/release/term bench agent -a ./my_agent.py \
-    -t ~/.cache/term-challenge/datasets/terminal-bench@2.0/hello-world
-
-# Run your agent on the full benchmark
-./target/release/term bench benchmark terminal-bench@2.0 -a ./my_agent.py
-
-# Run with concurrent tasks (faster)
-./target/release/term bench benchmark terminal-bench@2.0 -a ./my_agent.py -c 4
+# Verify
+term --version
 ```
 
-### Pass LLM credentials to your agent
-
-Your agent handles its own LLM calls. Pass credentials via environment variables:
+### Download the Benchmark Dataset
 
 ```bash
-# Provider/model/key are passed as env vars to your agent
-./target/release/term bench benchmark terminal-bench@2.0 -a ./my_agent.py \
+# Download Terminal-Bench 2.0 (91 tasks)
+term bench download terminal-bench@2.0
+
+# Verify download
+term bench cache
+```
+
+### Test Your Agent on a Single Task
+
+```bash
+# Test on one task first (faster iteration)
+term bench agent -a ./my_agent.py \
+    -t ~/.cache/term-challenge/datasets/terminal-bench@2.0/hello-world \
     -p openrouter \
     -m anthropic/claude-sonnet-4 \
     --api-key "sk-or-..."
 ```
 
-Your agent receives: `LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY` environment variables.
+### Run Full Benchmark
+
+```bash
+# Run on all 91 tasks
+term bench benchmark terminal-bench@2.0 -a ./my_agent.py \
+    -p openrouter \
+    -m anthropic/claude-sonnet-4 \
+    --api-key "sk-or-..."
+
+# Run with 4 concurrent tasks (faster, uses more API quota)
+term bench benchmark terminal-bench@2.0 -a ./my_agent.py \
+    -p openrouter \
+    -m anthropic/claude-sonnet-4 \
+    --api-key "sk-or-..." \
+    -c 4
+
+# Limit to first 10 tasks (for testing)
+term bench benchmark terminal-bench@2.0 -a ./my_agent.py -n 10 \
+    -p openrouter --api-key "sk-or-..."
+```
+
+### Environment Variables
+
+Your agent receives these environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `LLM_PROVIDER` | Provider name (openrouter, anthropic, etc.) |
+| `LLM_MODEL` | Model name |
+| `LLM_API_KEY` | API key for the provider |
+| `OPENROUTER_API_KEY` | Also set if provider is openrouter |
+
+### Auto-Update
+
+The CLI automatically pulls the latest Docker image (`ghcr.io/platformnetwork/term-challenge:latest`) before each run to ensure you have the latest SDK and environment.
 
 ## Scoring Overview
 
@@ -221,11 +265,26 @@ See the [Agent Development Guide](docs/agent-development/overview.md) for comple
 
 ```bash
 term bench benchmark terminal-bench@2.0 -a ./my_agent.py \
+    -p openrouter           # LLM provider (passed to agent as LLM_PROVIDER)
+    -m anthropic/claude-sonnet-4  # Model (passed as LLM_MODEL)
+    --api-key "sk-or-..."   # API key (passed as LLM_API_KEY)
     -c 4                    # Concurrent tasks (default: 1)
     -n 10                   # Max tasks to run (default: all)
     --max-steps 100         # Max steps per task (default: 100)
     --timeout-mult 2.0      # Timeout multiplier (default: 1.0)
     -o ./results            # Output directory
+```
+
+### Single Task Options
+
+```bash
+term bench agent -a ./my_agent.py \
+    -t ~/.cache/term-challenge/datasets/terminal-bench@2.0/hello-world \
+    -p openrouter           # LLM provider
+    -m anthropic/claude-sonnet-4  # Model
+    --api-key "sk-or-..."   # API key
+    --max-steps 50          # Max steps (default: 100)
+    --timeout-mult 1.5      # Timeout multiplier
 ```
 
 ### Submission & Status

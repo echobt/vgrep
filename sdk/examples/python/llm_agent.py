@@ -1,63 +1,101 @@
 #!/usr/bin/env python3
 """
-LLM-powered agent example.
+LLM-powered agent for Terminal Benchmark Challenge.
 
-Set OPENROUTER_API_KEY environment variable before running.
+This agent uses an LLM to solve terminal tasks. It's designed to work
+with the per-step execution model where each step is a fresh process.
+
+The agent is stateless - it doesn't need to remember previous steps
+because all context is provided in each request (instruction, output, etc.)
+
+Usage:
+    term bench agent -a llm_agent.py -t <task> -p openrouter --api-key "sk-..."
+    term bench benchmark terminal-bench@2.0 -a llm_agent.py -p openrouter --api-key "sk-..."
 """
-from term_sdk import Agent, Request, Response, LLM, run
+import os
+import sys
+
+from term_sdk import Agent, Request, Response, LLM, run, log
 
 
-SYSTEM_PROMPT = """You are a terminal agent. Complete tasks using shell commands.
+SYSTEM_PROMPT = """You are a terminal expert. You solve tasks by executing shell commands.
 
-Rules:
-1. Execute one command at a time
-2. Check command output before proceeding
-3. Use exit codes to detect errors (0 = success)
-4. Set task_complete=true only when verified complete
+IMPORTANT RULES:
+1. Execute ONE command at a time
+2. After each command, analyze the output and decide next action
+3. When the task is complete, respond with task_complete=true
+4. Keep commands simple and portable (bash on Linux)
 
-Respond with JSON:
-{"command": "shell command here", "task_complete": false}
+Output format (JSON):
+- To run a command: {"command": "your command here", "task_complete": false}
+- When done: {"command": null, "task_complete": true}
 
-When done:
-{"command": null, "task_complete": true}"""
+ONLY output valid JSON, nothing else."""
 
 
 class LLMAgent(Agent):
-    """Agent powered by an LLM."""
+    """
+    Stateless LLM agent that solves terminal tasks.
+    
+    Each step receives full context via the Request object, so no
+    state persistence is needed between steps.
+    """
     
     def setup(self):
-        self.llm = LLM(default_model="z-ai/glm-4.5")
-        self.history: list[str] = []
+        """Initialize LLM client."""
+        # Get model from environment or use default
+        self.model = os.environ.get("LLM_MODEL", "anthropic/claude-sonnet-4")
+        self.llm = LLM(model=self.model)
+        log(f"Using model: {self.model}")
     
     def solve(self, req: Request) -> Response:
-        # Build context
-        context = f"""Task: {req.instruction}
-
-Step: {req.step}
-Working Directory: {req.cwd}
-Last Command: {req.last_command}
-Exit Code: {req.exit_code}
-Output:
-{req.output or "(no output)"}
-"""
+        """Process one step using LLM."""
         
-        # Keep history manageable
-        self.history.append(f"Step {req.step}:\n{context}")
-        if len(self.history) > 5:
-            self.history = self.history[-5:]
+        # Build prompt with full context
+        prompt = self._build_prompt(req)
         
-        # Call LLM
-        prompt = "\n---\n".join(self.history) + "\n\nYour response (JSON):"
-        
+        # Get LLM response
         try:
-            result = self.llm.ask(prompt, system=SYSTEM_PROMPT)
+            result = self.llm.ask(prompt, temperature=0.1)
+            log(f"LLM response: {result.text[:100]}...")
+            
+            # Parse and return response
             return Response.from_llm(result.text)
+            
         except Exception as e:
-            print(f"LLM error: {e}", file=__import__('sys').stderr)
+            log(f"LLM error: {e}")
+            # On error, try to complete the task
             return Response.done()
     
+    def _build_prompt(self, req: Request) -> str:
+        """Build prompt with full context."""
+        parts = [
+            f"TASK: {req.instruction}",
+            f"\nCURRENT STEP: {req.step}",
+            f"WORKING DIRECTORY: {req.cwd}",
+        ]
+        
+        if req.last_command:
+            parts.append(f"\nLAST COMMAND: {req.last_command}")
+            parts.append(f"EXIT CODE: {req.exit_code}")
+            
+            if req.output:
+                # Truncate long output
+                output = req.output[-3000:] if len(req.output) > 3000 else req.output
+                parts.append(f"OUTPUT:\n```\n{output}\n```")
+        
+        if req.failed:
+            parts.append("\nWARNING: Last command failed! Try a different approach.")
+        
+        parts.append("\nWhat single command should I run next? (JSON only)")
+        
+        return "\n".join(parts)
+    
     def cleanup(self):
-        print(f"Total cost: ${self.llm.total_cost:.4f}", file=__import__('sys').stderr)
+        """Report final stats."""
+        stats = self.llm.get_stats()
+        log(f"Total cost: ${stats['total_cost']:.4f}")
+        log(f"Total tokens: {stats['total_tokens']}")
 
 
 if __name__ == "__main__":
