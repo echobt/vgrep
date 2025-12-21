@@ -32,6 +32,7 @@ pub mod bench;
 pub mod chain_storage;
 pub mod challenge;
 pub mod config;
+pub mod container_backend;
 pub mod distributed_store;
 pub mod docker;
 pub mod emission;
@@ -119,6 +120,11 @@ pub use agent_queue::{
     TaskEvalResult as QueueTaskResult,
 };
 pub use p2p_bridge::{HttpP2PBroadcaster, OutboxMessage, P2PBridgeState, P2PMessageEnvelope, P2PValidatorInfo};
+pub use container_backend::{
+    create_backend as create_container_backend, is_development_mode, is_secure_mode,
+    ContainerBackend, ContainerHandle, DirectDockerBackend, ExecOutput, MountConfig, SandboxConfig,
+    SecureBrokerBackend, DEFAULT_BROKER_SOCKET,
+};
 
 /// Root validator hotkey - always receives source code
 pub const ROOT_VALIDATOR_HOTKEY: &str = "5GziQCcRpN8NCJktX343brnfuVe3w6gUYieeStXPD1Dag2At";
