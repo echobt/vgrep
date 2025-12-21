@@ -119,13 +119,18 @@ impl DockerEnvironment {
         let mut mounts = vec![];
 
         // Mount tests directory (must be absolute path for Docker)
+        // For Docker-in-Docker, we need to map container paths to host paths
         let tests_dir = self.task.tests_dir();
         if tests_dir.exists() {
             let abs_tests_dir = tests_dir.canonicalize()
                 .with_context(|| format!("Failed to resolve tests dir: {}", tests_dir.display()))?;
+            
+            // Docker-in-Docker path mapping
+            let source_path = map_to_host_path(&abs_tests_dir);
+            
             mounts.push(Mount {
                 target: Some("/tests".to_string()),
-                source: Some(abs_tests_dir.to_string_lossy().to_string()),
+                source: Some(source_path),
                 typ: Some(MountTypeEnum::BIND),
                 read_only: Some(true),
                 ..Default::default()
@@ -140,9 +145,17 @@ impl DockerEnvironment {
         let abs_logs_dir = self.logs_dir.canonicalize()
             .with_context(|| format!("Failed to resolve logs dir: {}", self.logs_dir.display()))?;
 
+        // Docker-in-Docker path mapping for logs
+        let logs_source_path = map_to_host_path_generic(
+            &abs_logs_dir,
+            "BENCHMARK_RESULTS_DIR",
+            "HOST_BENCHMARK_RESULTS_DIR",
+            "/app/benchmark_results",
+        );
+
         mounts.push(Mount {
             target: Some("/logs".to_string()),
-            source: Some(abs_logs_dir.to_string_lossy().to_string()),
+            source: Some(logs_source_path),
             typ: Some(MountTypeEnum::BIND),
             read_only: Some(false),
             ..Default::default()
@@ -465,6 +478,41 @@ fn parse_memory_string(s: &str) -> Result<i64> {
     } else {
         s.parse().context("Invalid memory format")
     }
+}
+
+/// Map container path to host path for Docker-in-Docker scenarios
+///
+/// When running inside a container that uses Docker-in-Docker, bind mount paths
+/// must reference the host filesystem, not the container filesystem.
+/// 
+/// Uses HOST_TASKS_DIR and TASKS_DIR environment variables to perform the mapping.
+fn map_to_host_path(container_path: &Path) -> String {
+    map_to_host_path_generic(container_path, "TASKS_DIR", "HOST_TASKS_DIR", "/app/data/tasks")
+}
+
+/// Generic path mapping function for Docker-in-Docker
+fn map_to_host_path_generic(
+    container_path: &Path,
+    container_dir_env: &str,
+    host_dir_env: &str,
+    default_container_dir: &str,
+) -> String {
+    let path_str = container_path.to_string_lossy();
+    
+    // Check if host mapping is set (Docker-in-Docker scenario)
+    if let Ok(host_dir) = std::env::var(host_dir_env) {
+        let container_dir = std::env::var(container_dir_env).unwrap_or_else(|_| default_container_dir.to_string());
+        
+        if path_str.starts_with(&container_dir) {
+            let relative = path_str.strip_prefix(&container_dir).unwrap_or(&path_str);
+            let mapped = format!("{}{}", host_dir, relative);
+            debug!("Docker-in-Docker path mapping: {} -> {}", path_str, mapped);
+            return mapped;
+        }
+    }
+    
+    // No mapping needed - return original path
+    path_str.to_string()
 }
 
 #[cfg(test)]
