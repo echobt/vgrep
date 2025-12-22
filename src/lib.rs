@@ -29,6 +29,7 @@ pub mod agent_queue;
 pub mod agent_registry;
 pub mod agent_submission;
 pub mod bench;
+pub mod blockchain_evaluation;
 pub mod chain_storage;
 pub mod challenge;
 pub mod config;
@@ -64,6 +65,10 @@ pub use agent_queue::{
 pub use agent_registry::{AgentEntry, AgentRegistry, AgentStatus, RegistryConfig};
 pub use agent_submission::{
     AgentSubmission, AgentSubmissionHandler, SubmissionError, SubmissionStatus,
+};
+pub use blockchain_evaluation::{
+    AggregatedResult, BlockchainEvaluationManager, EvaluationContract, EvaluationError,
+    EvaluationSubmission, MINIMUM_STAKE_RAO, MINIMUM_VALIDATORS, SUCCESS_CODE_PREFIX,
 };
 pub use chain_storage::{
     allowed_data_keys, ChainStorage, ConsensusResult, Leaderboard as ChainLeaderboard,
