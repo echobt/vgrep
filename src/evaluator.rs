@@ -159,7 +159,8 @@ impl TaskEvaluator {
 
         // Write instruction file
         let instruction = task.instruction();
-        let encoded_instruction = base64::engine::general_purpose::STANDARD.encode(instruction.as_bytes());
+        let encoded_instruction =
+            base64::engine::general_purpose::STANDARD.encode(instruction.as_bytes());
         container
             .exec(&[
                 "sh",
