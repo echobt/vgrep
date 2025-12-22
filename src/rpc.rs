@@ -19,7 +19,7 @@
 
 use crate::{
     agent_registry::{AgentStatus, SubmissionAllowance},
-    blockchain_evaluation::{AggregatedResult, BlockchainEvaluationManager, EvaluationSubmission},
+    blockchain_evaluation::AggregatedResult,
     chain_storage::ChainStorage,
     config::ChallengeConfig,
     encrypted_api_key::ApiKeyConfig,
@@ -89,8 +89,6 @@ pub struct RpcState {
     pub sudo_controller: Arc<SudoController>,
     /// Current epoch (updated periodically)
     pub current_epoch: std::sync::atomic::AtomicU64,
-    /// Blockchain evaluation manager for validator consensus
-    pub blockchain_eval: Arc<BlockchainEvaluationManager>,
 }
 
 /// Term Challenge RPC Server
@@ -114,7 +112,6 @@ impl TermChallengeRpc {
     ) -> Self {
         let auth_manager = Arc::new(PlatformAuthManager::new(challenge_id.clone()));
         let sudo_controller = Arc::new(SudoController::new(owner_hotkey));
-        let blockchain_eval = Arc::new(BlockchainEvaluationManager::default());
 
         Self {
             config,
@@ -129,7 +126,6 @@ impl TermChallengeRpc {
                 secure_handler,
                 sudo_controller,
                 current_epoch: std::sync::atomic::AtomicU64::new(0),
-                blockchain_eval,
             }),
         }
     }
@@ -188,7 +184,8 @@ impl TermChallengeRpc {
             .route("/chain/votes/:agent_hash", get(get_chain_votes))
             .route("/chain/leaderboard", get(get_chain_leaderboard))
             // Blockchain Evaluation (validator consensus)
-            .route("/blockchain/submit", post(submit_blockchain_evaluation))
+            // Note: Evaluations are submitted via P2P, not HTTP
+            // Use /blockchain/* endpoints to query aggregated results
             .route("/blockchain/result/:agent_hash", get(get_blockchain_result))
             .route(
                 "/blockchain/evaluations/:agent_hash",
@@ -2381,150 +2378,93 @@ async fn get_miner_cooldowns(
 }
 
 // ==================== Blockchain Evaluation Endpoints ====================
+//
+// NOTE: Evaluations are submitted via P2P (ChallengeP2PMessage::EvaluationResult),
+// not via HTTP. These endpoints are for querying aggregated results.
+//
+// Flow:
+// 1. Validator evaluates agent
+// 2. Validator broadcasts EvaluationResult via P2P to all validators
+// 3. Each validator stores received evaluations in chain_storage
+// 4. When >= 3 validators have submitted, consensus is calculated
+// 5. Success code generated for agents meeting threshold
 
-/// Request to submit a blockchain evaluation
-#[derive(Debug, Deserialize)]
-pub struct BlockchainEvalRequest {
-    pub agent_hash: String,
-    pub validator_id: String,
-    pub tests_passed: u32,
-    pub tests_total: u32,
-    pub signature: String, // hex-encoded
-}
-
-/// Submit an evaluation to the blockchain
-async fn submit_blockchain_evaluation(
-    State(state): State<Arc<RpcState>>,
-    Json(req): Json<BlockchainEvalRequest>,
-) -> impl IntoResponse {
-    let signature = match hex::decode(&req.signature) {
-        Ok(s) => s,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": format!("Invalid signature hex: {}", e)
-                })),
-            );
-        }
-    };
-
-    match state.blockchain_eval.submit_evaluation(
-        &req.agent_hash,
-        &req.validator_id,
-        req.tests_passed,
-        req.tests_total,
-        signature,
-    ) {
-        Ok(Some(result)) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "success": true,
-                "consensus_reached": true,
-                "result": {
-                    "agent_hash": result.agent_hash,
-                    "final_success_rate": result.final_success_rate,
-                    "confidence_score": result.confidence_score,
-                    "validator_count": result.validator_count,
-                    "success_code": result.success_code,
-                    "timestamp": result.calculation_timestamp
-                }
-            })),
-        ),
-        Ok(None) => {
-            let pending = state.blockchain_eval.get_pending_count(&req.agent_hash);
-            (
-                StatusCode::ACCEPTED,
-                Json(serde_json::json!({
-                    "success": true,
-                    "consensus_reached": false,
-                    "pending_evaluations": pending,
-                    "required": 3,
-                    "message": format!("Evaluation recorded. {} of 3 validators submitted.", pending)
-                })),
-            )
-        }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "success": false,
-                "error": e.to_string()
-            })),
-        ),
-    }
-}
-
-/// Get blockchain evaluation result for an agent
+/// Get blockchain evaluation result for an agent (from P2P consensus)
 async fn get_blockchain_result(
     State(state): State<Arc<RpcState>>,
     Path(agent_hash): Path<String>,
 ) -> impl IntoResponse {
-    match state.blockchain_eval.get_result(&agent_hash) {
-        Some(result) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "success": true,
-                "result": {
-                    "agent_hash": result.agent_hash,
-                    "final_success_rate": result.final_success_rate,
-                    "confidence_score": result.confidence_score,
-                    "validator_count": result.validator_count,
-                    "total_stake": result.total_stake,
-                    "consensus_reached": result.consensus_reached,
-                    "success_code": result.success_code,
-                    "epoch": result.epoch,
-                    "timestamp": result.calculation_timestamp
-                }
-            })),
-        ),
+    // Get consensus from chain_storage (populated via P2P)
+    match state.chain_storage.get_consensus(&agent_hash) {
+        Some(consensus) => {
+            let success_code = if consensus.consensus_reached && consensus.consensus_score >= 0.6 {
+                Some(AggregatedResult::generate_success_code(
+                    &agent_hash,
+                    consensus.consensus_score,
+                    consensus.votes.len(),
+                ))
+            } else {
+                None
+            };
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "result": {
+                        "agent_hash": consensus.agent_hash,
+                        "final_success_rate": consensus.consensus_score,
+                        "validator_count": consensus.votes.len(),
+                        "consensus_reached": consensus.consensus_reached,
+                        "agreeing_validators": consensus.agreeing_validators,
+                        "disagreeing_validators": consensus.disagreeing_validators,
+                        "success_code": success_code,
+                        "epoch": consensus.epoch,
+                        "finalized_at_block": consensus.finalized_at_block
+                    }
+                })),
+            )
+        }
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "success": false,
-                "error": "No result found for agent"
+                "error": "No consensus result found. Evaluations are submitted via P2P."
             })),
         ),
     }
 }
 
-/// Get all evaluations for an agent
+/// Get all evaluations for an agent (from P2P votes)
 async fn get_blockchain_evaluations(
     State(state): State<Arc<RpcState>>,
     Path(agent_hash): Path<String>,
 ) -> impl IntoResponse {
-    let result = state.blockchain_eval.get_result(&agent_hash);
+    // Get votes from chain_storage (populated via P2P)
+    let votes = state.chain_storage.get_votes(&agent_hash);
 
-    let submissions: Vec<serde_json::Value> = result
-        .as_ref()
-        .map(|r| {
-            r.submissions
-                .iter()
-                .map(|s| {
-                    serde_json::json!({
-                        "validator_id": s.validator_id,
-                        "validator_stake": s.validator_stake,
-                        "tests_passed": s.tests_passed,
-                        "tests_total": s.tests_total,
-                        "success_rate": s.success_rate,
-                        "timestamp": s.timestamp,
-                        "epoch": s.epoch
-                    })
-                })
-                .collect()
+    let evaluations: Vec<serde_json::Value> = votes
+        .iter()
+        .map(|v| {
+            serde_json::json!({
+                "validator_hotkey": v.validator_hotkey,
+                "score": v.score,
+                "results_hash": v.results_hash,
+                "epoch": v.epoch,
+                "timestamp": v.timestamp
+            })
         })
-        .unwrap_or_default();
-
-    let pending = state.blockchain_eval.get_pending_count(&agent_hash);
+        .collect();
 
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "success": true,
             "agent_hash": agent_hash,
-            "evaluation_count": submissions.len(),
-            "pending_count": pending,
-            "evaluations": submissions
+            "evaluation_count": evaluations.len(),
+            "minimum_required": 3,
+            "evaluations": evaluations,
+            "note": "Evaluations are submitted via P2P broadcast, not HTTP"
         })),
     )
 }
@@ -2534,20 +2474,36 @@ async fn get_blockchain_success_code(
     State(state): State<Arc<RpcState>>,
     Path(agent_hash): Path<String>,
 ) -> impl IntoResponse {
-    match state.blockchain_eval.get_success_code(&agent_hash) {
-        Ok(code) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "success": true,
-                "agent_hash": agent_hash,
-                "success_code": code
-            })),
-        ),
-        Err(e) => (
+    match state.chain_storage.get_consensus(&agent_hash) {
+        Some(consensus) if consensus.consensus_reached => {
+            let code = AggregatedResult::generate_success_code(
+                &agent_hash,
+                consensus.consensus_score,
+                consensus.votes.len(),
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "agent_hash": agent_hash,
+                    "success_code": code,
+                    "score": consensus.consensus_score,
+                    "validator_count": consensus.votes.len()
+                })),
+            )
+        }
+        Some(_) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "success": false,
-                "error": e.to_string()
+                "error": "Consensus not reached yet"
+            })),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "success": false,
+                "error": "No evaluations found for agent"
             })),
         ),
     }
@@ -2558,21 +2514,33 @@ async fn get_blockchain_status(
     State(state): State<Arc<RpcState>>,
     Path(agent_hash): Path<String>,
 ) -> impl IntoResponse {
-    let pending = state.blockchain_eval.get_pending_count(&agent_hash);
-    let has_consensus = state.blockchain_eval.has_consensus(&agent_hash);
-    let result = state.blockchain_eval.get_result(&agent_hash);
+    let votes = state.chain_storage.get_votes(&agent_hash);
+    let consensus = state.chain_storage.get_consensus(&agent_hash);
+
+    let success_code = consensus.as_ref().and_then(|c| {
+        if c.consensus_reached && c.consensus_score >= 0.6 {
+            Some(AggregatedResult::generate_success_code(
+                &agent_hash,
+                c.consensus_score,
+                c.votes.len(),
+            ))
+        } else {
+            None
+        }
+    });
 
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "success": true,
             "agent_hash": agent_hash,
-            "pending_evaluations": pending,
-            "consensus_reached": has_consensus,
+            "evaluation_count": votes.len(),
+            "consensus_reached": consensus.as_ref().map(|c| c.consensus_reached).unwrap_or(false),
             "minimum_required": 3,
-            "final_success_rate": result.as_ref().map(|r| r.final_success_rate),
-            "success_code": result.as_ref().and_then(|r| r.success_code.clone()),
-            "validator_count": result.as_ref().map(|r| r.validator_count).unwrap_or(0)
+            "final_success_rate": consensus.as_ref().map(|c| c.consensus_score),
+            "success_code": success_code,
+            "validator_count": votes.len(),
+            "submission_method": "P2P broadcast (ChallengeP2PMessage::EvaluationResult)"
         })),
     )
 }
