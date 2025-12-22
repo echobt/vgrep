@@ -2,6 +2,9 @@
 # Pre-push hook for term-challenge
 # Run this before pushing to ensure CI will pass
 
+# Source cargo environment
+[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+
 set -e
 
 echo "🔍 Running pre-push checks..."
