@@ -134,6 +134,7 @@ impl AggregateScore {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LeaderboardEntry {
     pub agent_hash: String,
+    pub miner_hotkey: String,
     pub score: AggregateScore,
     pub evaluated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -153,13 +154,14 @@ impl Leaderboard {
     }
 
     /// Add or update an entry
-    pub fn update(&mut self, agent_hash: String, score: AggregateScore) {
+    pub fn update(&mut self, agent_hash: String, miner_hotkey: String, score: AggregateScore) {
         // Remove existing entry for this agent
         self.entries.retain(|e| e.agent_hash != agent_hash);
 
         // Add new entry
         self.entries.push(LeaderboardEntry {
             agent_hash,
+            miner_hotkey,
             score,
             evaluated_at: chrono::Utc::now(),
         });
@@ -314,8 +316,16 @@ mod tests {
             by_difficulty: HashMap::new(),
         };
 
-        leaderboard.update("agent1".to_string(), score1);
-        leaderboard.update("agent2".to_string(), score2);
+        leaderboard.update(
+            "agent1".to_string(),
+            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string(),
+            score1,
+        );
+        leaderboard.update(
+            "agent2".to_string(),
+            "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty".to_string(),
+            score2,
+        );
 
         assert_eq!(leaderboard.rank("agent2"), Some(1));
         assert_eq!(leaderboard.rank("agent1"), Some(2));

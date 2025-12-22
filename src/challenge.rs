@@ -134,7 +134,12 @@ impl TerminalBenchChallenge {
     }
 
     /// Record evaluation results from external source
-    pub async fn record_evaluation_result(&self, agent_hash: String, results: Vec<TaskResult>) {
+    pub async fn record_evaluation_result(
+        &self,
+        agent_hash: String,
+        miner_hotkey: String,
+        results: Vec<TaskResult>,
+    ) {
         // Cache results
         {
             let mut cache = self.results_cache.write().await;
@@ -153,7 +158,7 @@ impl TerminalBenchChallenge {
                 let aggregate = self.score_calculator.calculate_aggregate(&tasks, &results);
                 {
                     let mut lb = self.leaderboard.write().await;
-                    lb.update(agent_hash, aggregate);
+                    lb.update(agent_hash, miner_hotkey, aggregate);
                 }
             }
         }
@@ -195,7 +200,7 @@ impl TerminalBenchChallenge {
         let aggregate = self.score_calculator.calculate_aggregate(&tasks, &results);
         {
             let mut lb = self.leaderboard.write().await;
-            lb.update(agent.hash.clone(), aggregate);
+            lb.update(agent.hash.clone(), agent.miner_hotkey.clone(), aggregate);
         }
 
         Ok(results)
@@ -225,12 +230,12 @@ impl TerminalBenchChallenge {
         }
 
         // Assign weights proportional to normalized scores
+        // Use miner_hotkey (SS58 address) for weight assignment
         entries
             .iter()
             .map(|entry| {
                 let weight = entry.score.normalized_score / total_score;
-                WeightAssignment::new(entry.agent_hash.clone(), weight)
-                    .with_confidence(entry.score.pass_rate)
+                WeightAssignment::new(entry.miner_hotkey.clone(), weight)
             })
             .collect()
     }
@@ -280,8 +285,16 @@ impl Challenge for TerminalBenchChallenge {
             .and_then(|v| v.as_str())
             .unwrap_or(&agent.hash);
 
+        // Get miner hotkey from agent owner
+        let miner_hotkey = agent
+            .owner
+            .as_ref()
+            .map(|h| h.to_ss58())
+            .unwrap_or_default();
+
         let agent_info = AgentInfo {
             hash: agent.hash.clone(),
+            miner_hotkey,
             image: agent_image.to_string(),
             endpoint: payload
                 .get("endpoint")

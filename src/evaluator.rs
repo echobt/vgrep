@@ -16,6 +16,8 @@ use tracing::{debug, error, info, warn};
 pub struct AgentInfo {
     /// Agent hash (unique identifier)
     pub hash: String,
+    /// Miner hotkey (SS58 address) - who submitted this agent
+    pub miner_hotkey: String,
     /// Agent Docker image (not used - we use task image with injected code)
     pub image: String,
     /// Agent API endpoint (if applicable)

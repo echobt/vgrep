@@ -436,6 +436,7 @@ async fn submit_agent(
             if status.status == AgentStatus::Distributed {
                 let evaluation_id = uuid::Uuid::new_v4().to_string();
                 let agent_hash = status.agent_hash.clone();
+                let miner_hotkey = submission.miner_hotkey.clone();
                 let source_code = submission.source_code.clone();
                 let validator_hotkey =
                     std::env::var("VALIDATOR_HOTKEY").unwrap_or_else(|_| "auto-eval".to_string());
@@ -482,6 +483,7 @@ async fn submit_agent(
                     run_evaluation_with_progress(
                         evaluation_id,
                         agent_hash,
+                        miner_hotkey,
                         validator_hotkey,
                         source_code,
                         None, // No webhook
@@ -1201,6 +1203,7 @@ async fn trigger_evaluation(
     // Spawn background task to run actual evaluation
     let eval_id = evaluation_id.clone();
     let agent_h = agent_hash.clone();
+    let miner_h = agent.miner_hotkey.clone();
     let validator_h = validator_hotkey.clone();
     let progress_store = state.progress_store.clone();
     let challenge_config = state.challenge_config.clone();
@@ -1218,6 +1221,7 @@ async fn trigger_evaluation(
         run_evaluation_with_progress(
             eval_id,
             agent_h,
+            miner_h,
             validator_h,
             source_code,
             webhook_url,
@@ -1248,6 +1252,7 @@ async fn trigger_evaluation(
 async fn run_evaluation_with_progress(
     evaluation_id: String,
     agent_hash: String,
+    miner_hotkey: String,
     validator_hotkey: String,
     source_code: String,
     webhook_url: Option<String>,
@@ -1282,6 +1287,7 @@ async fn run_evaluation_with_progress(
     // Create agent info
     let agent_info = crate::evaluator::AgentInfo {
         hash: agent_hash.clone(),
+        miner_hotkey: miner_hotkey.clone(),
         image: format!(
             "term-challenge/agent:{}",
             &agent_hash[..12.min(agent_hash.len())]

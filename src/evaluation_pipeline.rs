@@ -245,6 +245,7 @@ impl EvaluationPipeline {
         // Create agent info
         let agent_info = AgentInfo {
             hash: agent_hash.to_string(),
+            miner_hotkey: submission.miner_hotkey.clone(),
             image: format!("term-challenge/agent:{}", &agent_hash[..12]),
             endpoint: None,
             source_code: Some(String::from_utf8_lossy(&submission.code).to_string()),
