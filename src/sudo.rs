@@ -489,11 +489,84 @@ pub enum TaskDifficulty {
 // Sudo Controller
 // ============================================================================
 
+/// LLM validation rules configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmValidationRules {
+    /// List of rules for validating agent code
+    pub rules: Vec<String>,
+    /// Version number (incremented on each update)
+    pub version: u64,
+    /// Last update timestamp
+    pub updated_at: DateTime<Utc>,
+    /// Who updated the rules
+    pub updated_by: String,
+    /// Whether LLM validation is enabled
+    pub enabled: bool,
+    /// Minimum approval rate (0.5 = 50%)
+    pub min_approval_rate: f64,
+    /// Minimum validator participation (0.5 = 50% of validators must review)
+    pub min_participation_rate: f64,
+}
+
+impl Default for LlmValidationRules {
+    fn default() -> Self {
+        Self {
+            rules: vec![
+                "The agent must use only the term_sdk module for interacting with the terminal".to_string(),
+                "The agent must not attempt to access the network or make HTTP requests".to_string(),
+                "The agent must not attempt to read or write files outside the working directory".to_string(),
+                "The agent must not use subprocess, os.system, or exec to run arbitrary commands".to_string(),
+                "The agent must not attempt to import forbidden modules (socket, requests, urllib, etc.)".to_string(),
+                "The agent must implement a valid solve() method that returns Response objects".to_string(),
+                "The agent must not contain obfuscated or encoded malicious code".to_string(),
+                "The agent must not attempt to escape the sandbox environment".to_string(),
+                "The agent must not contain infinite loops without termination conditions".to_string(),
+                "The agent code must be readable and not intentionally obscured".to_string(),
+            ],
+            version: 1,
+            updated_at: Utc::now(),
+            updated_by: "genesis".to_string(),
+            enabled: true,
+            min_approval_rate: 0.5,
+            min_participation_rate: 0.5,
+        }
+    }
+}
+
+/// Pending manual review entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingManualReview {
+    pub agent_hash: String,
+    pub miner_hotkey: String,
+    pub rejection_reasons: Vec<String>,
+    pub submitted_at: DateTime<Utc>,
+    pub status: ManualReviewStatus,
+    pub reviewed_at: Option<DateTime<Utc>>,
+    pub reviewed_by: Option<String>,
+    pub review_notes: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManualReviewStatus {
+    Pending,
+    Approved,
+    Rejected,
+}
+
+/// Miner cooldown for failed reviews
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MinerCooldown {
+    pub miner_hotkey: String,
+    pub blocked_until_epoch: u64,
+    pub reason: String,
+    pub blocked_at: DateTime<Utc>,
+}
+
 /// Main sudo controller for term-challenge administration
 pub struct SudoController {
-    /// Root sudo key (subnet owner)
-    root_key: String,
-    /// All sudo keys
+    /// Owner hotkey (subnet owner) - the only hotkey with root sudo access
+    owner_hotkey: String,
+    /// All sudo keys (additional admins granted by owner)
     sudo_keys: RwLock<HashMap<String, SudoKey>>,
     /// Dynamic whitelist
     whitelist: RwLock<DynamicWhitelist>,
@@ -513,6 +586,14 @@ pub struct SudoController {
     paused: RwLock<bool>,
     /// Audit log
     audit_log: RwLock<Vec<SudoAuditEntry>>,
+    /// LLM validation rules
+    llm_validation_rules: RwLock<LlmValidationRules>,
+    /// Pending manual reviews
+    pending_reviews: RwLock<HashMap<String, PendingManualReview>>,
+    /// Miner cooldowns (blocked for 3 epochs after rejection)
+    miner_cooldowns: RwLock<HashMap<String, MinerCooldown>>,
+    /// Cooldown duration in epochs
+    cooldown_epochs: u64,
 }
 
 /// Audit log entry for sudo operations
@@ -527,13 +608,13 @@ pub struct SudoAuditEntry {
 }
 
 impl SudoController {
-    /// Create new sudo controller with root key
-    pub fn new(root_key: String) -> Self {
+    /// Create new sudo controller with owner hotkey
+    pub fn new(owner_hotkey: String) -> Self {
         let mut sudo_keys = HashMap::new();
         sudo_keys.insert(
-            root_key.clone(),
+            owner_hotkey.clone(),
             SudoKey {
-                hotkey: root_key.clone(),
+                hotkey: owner_hotkey.clone(),
                 level: SudoLevel::Root,
                 granted_at: Utc::now(),
                 granted_by: "genesis".to_string(),
@@ -543,7 +624,7 @@ impl SudoController {
         );
 
         Self {
-            root_key,
+            owner_hotkey,
             sudo_keys: RwLock::new(sudo_keys),
             whitelist: RwLock::new(DynamicWhitelist::default()),
             pricing: RwLock::new(DynamicPricing::default()),
@@ -554,7 +635,21 @@ impl SudoController {
             banned_validators: RwLock::new(HashSet::new()),
             paused: RwLock::new(false),
             audit_log: RwLock::new(Vec::new()),
+            llm_validation_rules: RwLock::new(LlmValidationRules::default()),
+            pending_reviews: RwLock::new(HashMap::new()),
+            miner_cooldowns: RwLock::new(HashMap::new()),
+            cooldown_epochs: 3,
         }
+    }
+    
+    /// Get the owner hotkey
+    pub fn owner_hotkey(&self) -> &str {
+        &self.owner_hotkey
+    }
+    
+    /// Check if a hotkey is the owner
+    pub fn is_owner(&self, hotkey: &str) -> bool {
+        self.owner_hotkey == hotkey
     }
 
     /// Check if operator has permission
@@ -609,7 +704,7 @@ impl SudoController {
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<(), SudoError> {
         // Only root can grant keys
-        if operator != self.root_key {
+        if operator != self.owner_hotkey {
             return Err(SudoError::Unauthorized(
                 "Only root can grant sudo keys".into(),
             ));
@@ -641,12 +736,12 @@ impl SudoController {
 
     /// Revoke sudo key (Root only)
     pub fn revoke_sudo_key(&self, operator: &str, target: &str) -> Result<(), SudoError> {
-        if operator != self.root_key {
+        if operator != self.owner_hotkey {
             return Err(SudoError::Unauthorized(
                 "Only root can revoke sudo keys".into(),
             ));
         }
-        if target == self.root_key {
+        if target == self.owner_hotkey {
             return Err(SudoError::InvalidOperation("Cannot revoke root key".into()));
         }
 
@@ -1307,7 +1402,7 @@ impl SudoController {
 
     /// Import configuration (Root only)
     pub fn import_config(&self, operator: &str, config: SudoConfigExport) -> Result<(), SudoError> {
-        if operator != self.root_key {
+        if operator != self.owner_hotkey {
             return Err(SudoError::Unauthorized(
                 "Only root can import config".into(),
             ));
@@ -1340,6 +1435,339 @@ impl SudoController {
             None,
         );
         Ok(())
+    }
+
+    // ========== LLM Validation Rules Management ==========
+
+    /// Get current LLM validation rules
+    pub fn get_llm_validation_rules(&self) -> LlmValidationRules {
+        self.llm_validation_rules.read().clone()
+    }
+
+    /// Set all LLM validation rules (replaces existing)
+    pub fn set_llm_validation_rules(
+        &self,
+        operator: &str,
+        rules: Vec<String>,
+    ) -> Result<(), SudoError> {
+        if !self.has_permission(operator, SudoPermission::ModifyLimits) {
+            return Err(SudoError::Unauthorized(
+                "No permission to modify LLM rules".into(),
+            ));
+        }
+
+        let mut llm_rules = self.llm_validation_rules.write();
+        llm_rules.rules = rules.clone();
+        llm_rules.version += 1;
+        llm_rules.updated_at = Utc::now();
+        llm_rules.updated_by = operator.to_string();
+
+        self.audit(
+            operator,
+            "set_llm_validation_rules",
+            serde_json::json!({
+                "rules_count": rules.len(),
+                "version": llm_rules.version
+            }),
+            true,
+            None,
+        );
+        Ok(())
+    }
+
+    /// Add a single LLM validation rule
+    pub fn add_llm_validation_rule(
+        &self,
+        operator: &str,
+        rule: String,
+    ) -> Result<usize, SudoError> {
+        if !self.has_permission(operator, SudoPermission::ModifyLimits) {
+            return Err(SudoError::Unauthorized(
+                "No permission to modify LLM rules".into(),
+            ));
+        }
+
+        let mut llm_rules = self.llm_validation_rules.write();
+        llm_rules.rules.push(rule.clone());
+        llm_rules.version += 1;
+        llm_rules.updated_at = Utc::now();
+        llm_rules.updated_by = operator.to_string();
+        let index = llm_rules.rules.len() - 1;
+
+        self.audit(
+            operator,
+            "add_llm_validation_rule",
+            serde_json::json!({
+                "rule": rule,
+                "index": index,
+                "version": llm_rules.version
+            }),
+            true,
+            None,
+        );
+        Ok(index)
+    }
+
+    /// Remove an LLM validation rule by index
+    pub fn remove_llm_validation_rule(
+        &self,
+        operator: &str,
+        index: usize,
+    ) -> Result<String, SudoError> {
+        if !self.has_permission(operator, SudoPermission::ModifyLimits) {
+            return Err(SudoError::Unauthorized(
+                "No permission to modify LLM rules".into(),
+            ));
+        }
+
+        let mut llm_rules = self.llm_validation_rules.write();
+        if index >= llm_rules.rules.len() {
+            return Err(SudoError::ValidationError(format!(
+                "Rule index {} out of bounds (max: {})",
+                index,
+                llm_rules.rules.len()
+            )));
+        }
+
+        let removed = llm_rules.rules.remove(index);
+        llm_rules.version += 1;
+        llm_rules.updated_at = Utc::now();
+        llm_rules.updated_by = operator.to_string();
+
+        self.audit(
+            operator,
+            "remove_llm_validation_rule",
+            serde_json::json!({
+                "removed_rule": removed,
+                "index": index,
+                "version": llm_rules.version
+            }),
+            true,
+            None,
+        );
+        Ok(removed)
+    }
+
+    /// Enable/disable LLM validation
+    pub fn set_llm_validation_enabled(
+        &self,
+        operator: &str,
+        enabled: bool,
+    ) -> Result<(), SudoError> {
+        if !self.has_permission(operator, SudoPermission::ModifyLimits) {
+            return Err(SudoError::Unauthorized(
+                "No permission to modify LLM settings".into(),
+            ));
+        }
+
+        let mut llm_rules = self.llm_validation_rules.write();
+        llm_rules.enabled = enabled;
+        llm_rules.updated_at = Utc::now();
+        llm_rules.updated_by = operator.to_string();
+
+        self.audit(
+            operator,
+            "set_llm_validation_enabled",
+            serde_json::json!({"enabled": enabled}),
+            true,
+            None,
+        );
+        Ok(())
+    }
+
+    /// Set minimum approval rate for LLM validation
+    pub fn set_llm_min_approval_rate(
+        &self,
+        operator: &str,
+        rate: f64,
+    ) -> Result<(), SudoError> {
+        if !self.has_permission(operator, SudoPermission::ModifyLimits) {
+            return Err(SudoError::Unauthorized(
+                "No permission to modify LLM settings".into(),
+            ));
+        }
+        if !(0.0..=1.0).contains(&rate) {
+            return Err(SudoError::ValidationError(
+                "Approval rate must be between 0.0 and 1.0".into(),
+            ));
+        }
+
+        let mut llm_rules = self.llm_validation_rules.write();
+        llm_rules.min_approval_rate = rate;
+        llm_rules.updated_at = Utc::now();
+        llm_rules.updated_by = operator.to_string();
+
+        self.audit(
+            operator,
+            "set_llm_min_approval_rate",
+            serde_json::json!({"rate": rate}),
+            true,
+            None,
+        );
+        Ok(())
+    }
+
+    // ========== Manual Review Management ==========
+
+    /// Queue an agent for manual review
+    pub fn queue_manual_review(
+        &self,
+        agent_hash: String,
+        miner_hotkey: String,
+        rejection_reasons: Vec<String>,
+    ) {
+        let review = PendingManualReview {
+            agent_hash: agent_hash.clone(),
+            miner_hotkey,
+            rejection_reasons,
+            submitted_at: Utc::now(),
+            status: ManualReviewStatus::Pending,
+            reviewed_at: None,
+            reviewed_by: None,
+            review_notes: None,
+        };
+        self.pending_reviews.write().insert(agent_hash, review);
+    }
+
+    /// Get all pending manual reviews
+    pub fn get_pending_reviews(&self) -> Vec<PendingManualReview> {
+        self.pending_reviews
+            .read()
+            .values()
+            .filter(|r| r.status == ManualReviewStatus::Pending)
+            .cloned()
+            .collect()
+    }
+
+    /// Get a specific manual review
+    pub fn get_manual_review(&self, agent_hash: &str) -> Option<PendingManualReview> {
+        self.pending_reviews.read().get(agent_hash).cloned()
+    }
+
+    /// Approve an agent manually (Root/Admin only)
+    pub fn approve_agent_manually(
+        &self,
+        operator: &str,
+        agent_hash: &str,
+        notes: Option<String>,
+    ) -> Result<PendingManualReview, SudoError> {
+        if operator != self.owner_hotkey && !self.has_permission(operator, SudoPermission::ModifyLimits)
+        {
+            return Err(SudoError::Unauthorized(
+                "No permission to approve agents".into(),
+            ));
+        }
+
+        let mut reviews = self.pending_reviews.write();
+        let review = reviews
+            .get_mut(agent_hash)
+            .ok_or_else(|| SudoError::ValidationError("Review not found".into()))?;
+
+        review.status = ManualReviewStatus::Approved;
+        review.reviewed_at = Some(Utc::now());
+        review.reviewed_by = Some(operator.to_string());
+        review.review_notes = notes.clone();
+
+        let result = review.clone();
+
+        self.audit(
+            operator,
+            "approve_agent_manually",
+            serde_json::json!({
+                "agent_hash": agent_hash,
+                "miner_hotkey": result.miner_hotkey,
+                "notes": notes
+            }),
+            true,
+            None,
+        );
+
+        Ok(result)
+    }
+
+    /// Reject an agent manually (Root/Admin only) - blocks miner for 3 epochs
+    pub fn reject_agent_manually(
+        &self,
+        operator: &str,
+        agent_hash: &str,
+        reason: String,
+        current_epoch: u64,
+    ) -> Result<PendingManualReview, SudoError> {
+        if operator != self.owner_hotkey && !self.has_permission(operator, SudoPermission::ModifyLimits)
+        {
+            return Err(SudoError::Unauthorized(
+                "No permission to reject agents".into(),
+            ));
+        }
+
+        let mut reviews = self.pending_reviews.write();
+        let review = reviews
+            .get_mut(agent_hash)
+            .ok_or_else(|| SudoError::ValidationError("Review not found".into()))?;
+
+        review.status = ManualReviewStatus::Rejected;
+        review.reviewed_at = Some(Utc::now());
+        review.reviewed_by = Some(operator.to_string());
+        review.review_notes = Some(reason.clone());
+
+        let miner_hotkey = review.miner_hotkey.clone();
+        let result = review.clone();
+        drop(reviews);
+
+        // Block the miner for 3 epochs
+        let cooldown = MinerCooldown {
+            miner_hotkey: miner_hotkey.clone(),
+            blocked_until_epoch: current_epoch + self.cooldown_epochs,
+            reason: reason.clone(),
+            blocked_at: Utc::now(),
+        };
+        self.miner_cooldowns.write().insert(miner_hotkey.clone(), cooldown);
+
+        self.audit(
+            operator,
+            "reject_agent_manually",
+            serde_json::json!({
+                "agent_hash": agent_hash,
+                "miner_hotkey": miner_hotkey,
+                "reason": reason,
+                "blocked_until_epoch": current_epoch + self.cooldown_epochs
+            }),
+            true,
+            None,
+        );
+
+        Ok(result)
+    }
+
+    // ========== Miner Cooldown Management ==========
+
+    /// Check if a miner is on cooldown
+    pub fn is_miner_on_cooldown(&self, miner_hotkey: &str, current_epoch: u64) -> Option<MinerCooldown> {
+        let cooldowns = self.miner_cooldowns.read();
+        if let Some(cooldown) = cooldowns.get(miner_hotkey) {
+            if current_epoch < cooldown.blocked_until_epoch {
+                return Some(cooldown.clone());
+            }
+        }
+        None
+    }
+
+    /// Get all active cooldowns
+    pub fn get_active_cooldowns(&self, current_epoch: u64) -> Vec<MinerCooldown> {
+        self.miner_cooldowns
+            .read()
+            .values()
+            .filter(|c| current_epoch < c.blocked_until_epoch)
+            .cloned()
+            .collect()
+    }
+
+    /// Clear expired cooldowns
+    pub fn clear_expired_cooldowns(&self, current_epoch: u64) -> usize {
+        let mut cooldowns = self.miner_cooldowns.write();
+        let before = cooldowns.len();
+        cooldowns.retain(|_, c| current_epoch < c.blocked_until_epoch);
+        before - cooldowns.len()
     }
 }
 

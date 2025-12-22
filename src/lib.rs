@@ -40,6 +40,7 @@ pub mod encrypted_api_key;
 pub mod evaluation_pipeline;
 pub mod evaluator;
 pub mod llm_client;
+pub mod llm_review;
 pub mod p2p_bridge;
 pub mod platform_auth;
 pub mod python_whitelist;

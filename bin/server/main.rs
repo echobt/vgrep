@@ -47,6 +47,10 @@ struct Args {
     /// Validator hotkey (hex encoded, for P2P signing)
     #[arg(long, env = "VALIDATOR_HOTKEY")]
     validator_hotkey: Option<String>,
+
+    /// Owner hotkey (subnet owner, hex encoded - has sudo privileges)
+    #[arg(long, env = "OWNER_HOTKEY")]
+    owner_hotkey: Option<String>,
 }
 
 #[tokio::main]
@@ -84,6 +88,7 @@ async fn main() -> Result<()> {
             Hotkey::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
                 .unwrap()
         });
+    let validator_hotkey_hex = validator_hotkey.to_hex();
 
     // Initialize components
     let registry_config = RegistryConfig::default();
@@ -118,6 +123,11 @@ async fn main() -> Result<()> {
         port: args.port,
     };
 
+    // Get owner hotkey (defaults to validator hotkey if not specified)
+    let owner_hotkey = args.owner_hotkey
+        .unwrap_or_else(|| validator_hotkey_hex.clone());
+    info!("Owner hotkey: {}...", &owner_hotkey[..16.min(owner_hotkey.len())]);
+
     let rpc = TermChallengeRpc::new(
         rpc_config,
         handler,
@@ -127,6 +137,7 @@ async fn main() -> Result<()> {
         p2p_broadcaster,
         secure_handler,
         args.challenge_id.clone(),
+        owner_hotkey,
     );
 
     info!("Term Challenge Server ready");

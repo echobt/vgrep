@@ -25,6 +25,7 @@ use crate::{
     p2p_bridge::{HttpP2PBroadcaster, OutboxMessage, P2PMessageEnvelope, P2PValidatorInfo},
     platform_auth::{AuthRequest, AuthResponse, PlatformAuthManager},
     secure_submission::SecureSubmissionHandler,
+    sudo::SudoController,
     task_execution::ProgressStore,
     validator_distribution::ObfuscatedPackage,
     AgentSubmission, AgentSubmissionHandler, SubmissionStatus, ValidatorInfo,
@@ -33,7 +34,7 @@ use axum::{
     extract::{Json, Path, Query, State},
     http::{header::HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use platform_challenge_sdk::{ChallengeP2PMessage, DecryptionKeyReveal, EncryptedSubmission};
@@ -72,6 +73,10 @@ pub struct RpcState {
     pub auth_manager: Arc<PlatformAuthManager>,
     /// Challenge ID for this container
     pub challenge_id: String,
+    /// Sudo controller for LLM validation rules and manual reviews
+    pub sudo_controller: Arc<SudoController>,
+    /// Current epoch (updated periodically)
+    pub current_epoch: std::sync::atomic::AtomicU64,
 }
 
 /// Term Challenge RPC Server
@@ -91,8 +96,10 @@ impl TermChallengeRpc {
         p2p_broadcaster: Arc<HttpP2PBroadcaster>,
         secure_handler: Option<Arc<SecureSubmissionHandler>>,
         challenge_id: String,
+        owner_hotkey: String,
     ) -> Self {
         let auth_manager = Arc::new(PlatformAuthManager::new(challenge_id.clone()));
+        let sudo_controller = Arc::new(SudoController::new(owner_hotkey));
         
         Self {
             config,
@@ -105,6 +112,8 @@ impl TermChallengeRpc {
                 challenge_config,
                 p2p_broadcaster,
                 secure_handler,
+                sudo_controller,
+                current_epoch: std::sync::atomic::AtomicU64::new(0),
             }),
         }
     }
@@ -175,6 +184,17 @@ impl TermChallengeRpc {
             .route("/p2p/validators", post(update_p2p_validators))
             // Dev/Testing endpoints
             .route("/evaluate/:agent_hash", post(trigger_evaluation))
+            .route("/llm/test", post(test_llm_review))
+            // Sudo endpoints (LLM validation rules, manual reviews)
+            .route("/sudo/rules", get(get_llm_rules))
+            .route("/sudo/rules", post(set_llm_rules))
+            .route("/sudo/rules/add", post(add_llm_rule))
+            .route("/sudo/rules/remove/:index", delete(remove_llm_rule))
+            .route("/sudo/rules/enabled", post(set_llm_enabled))
+            .route("/sudo/reviews/pending", get(get_pending_manual_reviews))
+            .route("/sudo/reviews/approve/:agent_hash", post(approve_agent))
+            .route("/sudo/reviews/reject/:agent_hash", post(reject_agent))
+            .route("/sudo/cooldowns", get(get_miner_cooldowns))
             .with_state(self.state.clone())
     }
 
@@ -1775,4 +1795,325 @@ async fn update_p2p_validators(
             "count": req.validators.len()
         })),
     )
+}
+
+// ==================== Sudo Handlers (LLM Rules & Manual Reviews) ====================
+
+/// Verify that the caller is authenticated as the owner (has sudo privileges)
+/// Returns the owner hotkey if authenticated, otherwise an error response
+fn verify_sudo_auth(state: &Arc<RpcState>, headers: &HeaderMap) -> Result<String, (StatusCode, String)> {
+    // Get the session token
+    let token = headers
+        .get("X-Auth-Token")
+        .and_then(|v| v.to_str().ok())
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing X-Auth-Token header".to_string()))?;
+    
+    // Verify the session and get the authenticated hotkey
+    let session = state.auth_manager
+        .verify_token(token)
+        .ok_or((StatusCode::UNAUTHORIZED, "Invalid or expired session".to_string()))?;
+    
+    let authenticated_hotkey = session.hotkey.to_hex();
+    
+    // Check if the authenticated hotkey is the owner
+    if !state.sudo_controller.is_owner(&authenticated_hotkey) {
+        return Err((StatusCode::FORBIDDEN, "Not authorized: only owner can perform sudo operations".to_string()));
+    }
+    
+    Ok(authenticated_hotkey)
+}
+
+/// Get current LLM validation rules
+async fn get_llm_rules(
+    State(state): State<Arc<RpcState>>,
+) -> impl IntoResponse {
+    let rules = state.sudo_controller.get_llm_validation_rules();
+    (StatusCode::OK, Json(rules))
+}
+
+/// Request to set LLM rules
+#[derive(Debug, Deserialize)]
+pub struct SetLlmRulesRequest {
+    pub rules: Vec<String>,
+}
+
+/// Set LLM validation rules (requires sudo key)
+async fn set_llm_rules(
+    State(state): State<Arc<RpcState>>,
+    headers: HeaderMap,
+    Json(req): Json<SetLlmRulesRequest>,
+) -> impl IntoResponse {
+    let sudo_key = match verify_sudo_auth(&state, &headers) {
+        Ok(key) => key,
+        Err((status, msg)) => return (status, Json(serde_json::json!({"success": false, "error": msg}))),
+    };
+
+    match state.sudo_controller.set_llm_validation_rules(&sudo_key, req.rules) {
+        Ok(_) => {
+            let rules = state.sudo_controller.get_llm_validation_rules();
+            (StatusCode::OK, Json(serde_json::json!({
+                "success": true,
+                "version": rules.version,
+                "rules_count": rules.rules.len()
+            })))
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        }))),
+    }
+}
+
+/// Request to add a single LLM rule
+#[derive(Debug, Deserialize)]
+pub struct AddLlmRuleRequest {
+    pub rule: String,
+}
+
+/// Add a single LLM validation rule
+async fn add_llm_rule(
+    State(state): State<Arc<RpcState>>,
+    headers: HeaderMap,
+    Json(req): Json<AddLlmRuleRequest>,
+) -> impl IntoResponse {
+    let sudo_key = match verify_sudo_auth(&state, &headers) {
+        Ok(key) => key,
+        Err((status, msg)) => return (status, Json(serde_json::json!({"success": false, "error": msg}))),
+    };
+
+    match state.sudo_controller.add_llm_validation_rule(&sudo_key, req.rule) {
+        Ok(index) => (StatusCode::OK, Json(serde_json::json!({
+            "success": true,
+            "index": index
+        }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        }))),
+    }
+}
+
+/// Remove an LLM validation rule by index
+async fn remove_llm_rule(
+    State(state): State<Arc<RpcState>>,
+    headers: HeaderMap,
+    Path(index): Path<usize>,
+) -> impl IntoResponse {
+    let sudo_key = match verify_sudo_auth(&state, &headers) {
+        Ok(key) => key,
+        Err((status, msg)) => return (status, Json(serde_json::json!({"success": false, "error": msg}))),
+    };
+
+    match state.sudo_controller.remove_llm_validation_rule(&sudo_key, index) {
+        Ok(removed) => (StatusCode::OK, Json(serde_json::json!({
+            "success": true,
+            "removed_rule": removed
+        }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        }))),
+    }
+}
+
+/// Request to enable/disable LLM validation
+#[derive(Debug, Deserialize)]
+pub struct SetLlmEnabledRequest {
+    pub enabled: bool,
+}
+
+/// Enable or disable LLM validation
+async fn set_llm_enabled(
+    State(state): State<Arc<RpcState>>,
+    headers: HeaderMap,
+    Json(req): Json<SetLlmEnabledRequest>,
+) -> impl IntoResponse {
+    let sudo_key = match verify_sudo_auth(&state, &headers) {
+        Ok(key) => key,
+        Err((status, msg)) => return (status, Json(serde_json::json!({"success": false, "error": msg}))),
+    };
+
+    match state.sudo_controller.set_llm_validation_enabled(&sudo_key, req.enabled) {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({
+            "success": true,
+            "enabled": req.enabled
+        }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        }))),
+    }
+}
+
+/// Get pending manual reviews
+async fn get_pending_manual_reviews(
+    State(state): State<Arc<RpcState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Sudo key required to see pending reviews
+    if let Err((status, msg)) = verify_sudo_auth(&state, &headers) {
+        return (status, Json(serde_json::json!({"success": false, "error": msg, "reviews": []})));
+    }
+
+    let reviews = state.sudo_controller.get_pending_reviews();
+    (StatusCode::OK, Json(serde_json::json!({
+        "success": true,
+        "count": reviews.len(),
+        "reviews": reviews
+    })))
+}
+
+/// Request to approve/reject an agent
+#[derive(Debug, Deserialize)]
+pub struct ManualReviewRequest {
+    pub notes: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// Approve an agent manually
+async fn approve_agent(
+    State(state): State<Arc<RpcState>>,
+    headers: HeaderMap,
+    Path(agent_hash): Path<String>,
+    Json(req): Json<ManualReviewRequest>,
+) -> impl IntoResponse {
+    let sudo_key = match verify_sudo_auth(&state, &headers) {
+        Ok(key) => key,
+        Err((status, msg)) => return (status, Json(serde_json::json!({"success": false, "error": msg}))),
+    };
+
+    match state.sudo_controller.approve_agent_manually(&sudo_key, &agent_hash, req.notes) {
+        Ok(review) => (StatusCode::OK, Json(serde_json::json!({
+            "success": true,
+            "agent_hash": agent_hash,
+            "miner_hotkey": review.miner_hotkey,
+            "status": "approved"
+        }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        }))),
+    }
+}
+
+/// Reject an agent manually (blocks miner for 3 epochs)
+async fn reject_agent(
+    State(state): State<Arc<RpcState>>,
+    headers: HeaderMap,
+    Path(agent_hash): Path<String>,
+    Json(req): Json<ManualReviewRequest>,
+) -> impl IntoResponse {
+    let sudo_key = match verify_sudo_auth(&state, &headers) {
+        Ok(key) => key,
+        Err((status, msg)) => return (status, Json(serde_json::json!({"success": false, "error": msg}))),
+    };
+
+    let reason = req.reason.unwrap_or_else(|| "Manual rejection".to_string());
+    let current_epoch = state.current_epoch.load(std::sync::atomic::Ordering::Relaxed);
+
+    match state.sudo_controller.reject_agent_manually(&sudo_key, &agent_hash, reason.clone(), current_epoch) {
+        Ok(review) => (StatusCode::OK, Json(serde_json::json!({
+            "success": true,
+            "agent_hash": agent_hash,
+            "miner_hotkey": review.miner_hotkey,
+            "status": "rejected",
+            "reason": reason,
+            "blocked_until_epoch": current_epoch + 3
+        }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        }))),
+    }
+}
+
+/// Get active miner cooldowns
+async fn get_miner_cooldowns(
+    State(state): State<Arc<RpcState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Sudo key required to see cooldowns
+    if let Err((status, msg)) = verify_sudo_auth(&state, &headers) {
+        return (status, Json(serde_json::json!({"success": false, "error": msg, "cooldowns": []})));
+    }
+
+    let current_epoch = state.current_epoch.load(std::sync::atomic::Ordering::Relaxed);
+    let cooldowns = state.sudo_controller.get_active_cooldowns(current_epoch);
+    
+    (StatusCode::OK, Json(serde_json::json!({
+        "success": true,
+        "current_epoch": current_epoch,
+        "count": cooldowns.len(),
+        "cooldowns": cooldowns
+    })))
+}
+
+// ==================== LLM Review Test Endpoint ====================
+
+/// Request to test LLM review
+#[derive(Debug, Deserialize)]
+pub struct TestLlmReviewRequest {
+    pub source_code: String,
+    pub rules: Option<Vec<String>>,
+}
+
+/// Test LLM review on a code snippet (dev endpoint)
+async fn test_llm_review(
+    State(state): State<Arc<RpcState>>,
+    Json(req): Json<TestLlmReviewRequest>,
+) -> impl IntoResponse {
+    use crate::llm_review::{LlmConfig, LlmReviewManager, ValidationRules};
+    
+    // Get LLM config from environment
+    let llm_config = match LlmConfig::from_env() {
+        Some(cfg) => cfg,
+        None => {
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
+                "success": false,
+                "error": "LLM not configured. Set OPENROUTER_API_KEY or CHUTES_API_KEY environment variable."
+            })));
+        }
+    };
+    
+    // Create review manager with test hotkey
+    let manager = LlmReviewManager::new(llm_config, "test-validator".to_string());
+    
+    // Update rules if custom rules provided, or use defaults from sudo controller
+    if let Some(custom_rules) = req.rules {
+        let rules = ValidationRules::new(custom_rules);
+        manager.update_rules(rules);
+    } else {
+        let llm_rules = state.sudo_controller.get_llm_validation_rules();
+        let rules = ValidationRules::new(llm_rules.rules);
+        manager.update_rules(rules);
+    }
+    
+    // Generate a test agent hash
+    let agent_hash = format!("test_{:x}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis());
+    
+    // Perform review
+    match manager.review_code(&agent_hash, &req.source_code).await {
+        Ok(result) => {
+            let rules = manager.get_rules();
+            (StatusCode::OK, Json(serde_json::json!({
+                "success": true,
+                "approved": result.approved,
+                "reason": result.reason,
+                "violations": result.violations,
+                "reviewer_id": result.reviewer_id,
+                "rules_version": result.rules_version,
+                "rules_count": rules.rules.len()
+            })))
+        }
+        Err(e) => {
+            error!("LLM review failed: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                "success": false,
+                "error": format!("LLM review failed: {}", e)
+            })))
+        }
+    }
 }
