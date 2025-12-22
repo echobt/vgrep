@@ -184,8 +184,7 @@ impl TermChallengeRpc {
             .route("/p2p/validators", post(update_p2p_validators))
             // Dev/Testing endpoints
             .route("/evaluate/:agent_hash", post(trigger_evaluation))
-            .route("/llm/test", post(test_llm_review))
-            // Sudo endpoints (LLM validation rules, manual reviews)
+            // Sudo endpoints (LLM validation rules, manual reviews - rules are public)
             .route("/sudo/rules", get(get_llm_rules))
             .route("/sudo/rules", post(set_llm_rules))
             .route("/sudo/rules/add", post(add_llm_rule))
@@ -2048,72 +2047,3 @@ async fn get_miner_cooldowns(
     })))
 }
 
-// ==================== LLM Review Test Endpoint ====================
-
-/// Request to test LLM review
-#[derive(Debug, Deserialize)]
-pub struct TestLlmReviewRequest {
-    pub source_code: String,
-    pub rules: Option<Vec<String>>,
-}
-
-/// Test LLM review on a code snippet (dev endpoint)
-async fn test_llm_review(
-    State(state): State<Arc<RpcState>>,
-    Json(req): Json<TestLlmReviewRequest>,
-) -> impl IntoResponse {
-    use crate::llm_review::{LlmConfig, LlmReviewManager, ValidationRules};
-    
-    // Get LLM config from environment
-    let llm_config = match LlmConfig::from_env() {
-        Some(cfg) => cfg,
-        None => {
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
-                "success": false,
-                "error": "LLM not configured. Set OPENROUTER_API_KEY or CHUTES_API_KEY environment variable."
-            })));
-        }
-    };
-    
-    // Create review manager with test hotkey
-    let manager = LlmReviewManager::new(llm_config, "test-validator".to_string());
-    
-    // Update rules if custom rules provided, or use defaults from sudo controller
-    if let Some(custom_rules) = req.rules {
-        let rules = ValidationRules::new(custom_rules);
-        manager.update_rules(rules);
-    } else {
-        let llm_rules = state.sudo_controller.get_llm_validation_rules();
-        let rules = ValidationRules::new(llm_rules.rules);
-        manager.update_rules(rules);
-    }
-    
-    // Generate a test agent hash
-    let agent_hash = format!("test_{:x}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis());
-    
-    // Perform review
-    match manager.review_code(&agent_hash, &req.source_code).await {
-        Ok(result) => {
-            let rules = manager.get_rules();
-            (StatusCode::OK, Json(serde_json::json!({
-                "success": true,
-                "approved": result.approved,
-                "reason": result.reason,
-                "violations": result.violations,
-                "reviewer_id": result.reviewer_id,
-                "rules_version": result.rules_version,
-                "rules_count": rules.rules.len()
-            })))
-        }
-        Err(e) => {
-            error!("LLM review failed: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "success": false,
-                "error": format!("LLM review failed: {}", e)
-            })))
-        }
-    }
-}

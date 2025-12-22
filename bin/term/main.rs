@@ -135,6 +135,30 @@ enum Commands {
         agent: std::path::PathBuf,
     },
 
+    /// LLM review - validate agent against blockchain rules using LLM
+    #[command(visible_alias = "r")]
+    Review {
+        /// Path to the agent Python file
+        #[arg(short, long)]
+        agent: std::path::PathBuf,
+
+        /// Challenge RPC endpoint (for fetching rules)
+        #[arg(short, long, env = "TERM_CHALLENGE_URL")]
+        endpoint: Option<String>,
+
+        /// LLM API key (OpenRouter or Chutes)
+        #[arg(long, env = "LLM_API_KEY")]
+        api_key: Option<String>,
+
+        /// LLM provider: openrouter, chutes
+        #[arg(short, long)]
+        provider: Option<String>,
+
+        /// LLM model name
+        #[arg(short, long)]
+        model: Option<String>,
+    },
+
     /// Show challenge configuration
     Config,
 
@@ -310,6 +334,13 @@ async fn main() {
         Commands::Status { hash, watch } => commands::status::run(&cli.rpc, hash, watch).await,
         Commands::Leaderboard { limit } => commands::leaderboard::run(&cli.rpc, limit).await,
         Commands::Validate { agent } => commands::validate::run(agent).await,
+        Commands::Review {
+            agent,
+            endpoint,
+            api_key,
+            provider,
+            model,
+        } => commands::review::run(agent, endpoint, api_key, provider, model).await,
         Commands::Config => commands::config::run(&cli.rpc).await,
         Commands::Modules => commands::modules::run().await,
         Commands::Models => commands::models::run().await,
