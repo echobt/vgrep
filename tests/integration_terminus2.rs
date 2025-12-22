@@ -10,6 +10,7 @@ use term_challenge::{
     ValidatorDistributor, ValidatorInfo, WhitelistConfig,
 };
 
+#[allow(dead_code)]
 fn get_api_key() -> String {
     std::env::var("OPENROUTER_API_KEY").unwrap_or_else(|_| "test-key-not-set".to_string())
 }

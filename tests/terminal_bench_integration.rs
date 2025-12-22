@@ -19,6 +19,7 @@ fn get_api_key() -> String {
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 
 /// Terminal-bench task definition (matching Python format)
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct TerminalBenchTask {
     id: String,
@@ -343,6 +344,7 @@ fn evaluate_task(task: &TerminalBenchTask, response: &AgentResponse) -> TaskEval
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 struct TaskEvaluation {
     task_id: String,
@@ -352,6 +354,7 @@ struct TaskEvaluation {
 }
 
 /// Full pipeline result
+#[allow(dead_code)]
 #[derive(Debug)]
 struct PipelineResult {
     task_id: String,

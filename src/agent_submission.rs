@@ -409,29 +409,48 @@ impl AgentSubmissionHandler {
         Ok(consensus_reached)
     }
 
-    /// Get source package for a top validator
+    /// Get source package for a validator
     pub fn get_source_package(
         &self,
         agent_hash: &str,
         validator_hotkey: &str,
     ) -> Option<SourcePackage> {
-        // Verify validator is authorized
-        let pending = self.pending_consensus.read();
-        if let Some(consensus) = pending.get(agent_hash) {
-            if !consensus
-                .source_recipients
-                .contains(&validator_hotkey.to_string())
-            {
-                warn!(
-                    "Validator {} not authorized for source of agent {}",
-                    validator_hotkey, agent_hash
-                );
+        // Check if validator is authorized via submission status
+        let submissions = self.submissions.read();
+        if let Some(status) = submissions.get(agent_hash) {
+            if let Some(dist) = &status.distribution_status {
+                if !dist
+                    .source_recipients
+                    .contains(&validator_hotkey.to_string())
+                {
+                    warn!(
+                        "Validator {} not authorized for source of agent {}",
+                        validator_hotkey, agent_hash
+                    );
+                    return None;
+                }
+            } else {
                 return None;
             }
         } else {
-            return None;
+            // Fall back to pending_consensus for backward compatibility
+            let pending = self.pending_consensus.read();
+            if let Some(consensus) = pending.get(agent_hash) {
+                if !consensus
+                    .source_recipients
+                    .contains(&validator_hotkey.to_string())
+                {
+                    warn!(
+                        "Validator {} not authorized for source of agent {}",
+                        validator_hotkey, agent_hash
+                    );
+                    return None;
+                }
+            } else {
+                return None;
+            }
         }
-        drop(pending);
+        drop(submissions);
 
         self.source_packages.read().get(agent_hash).cloned()
     }
@@ -585,35 +604,9 @@ mod tests {
         assert!(result.is_ok());
 
         let status = result.unwrap();
-        // Initially just verified, waiting for consensus
-        assert_eq!(status.status, AgentStatus::Verified);
+        // Now immediately distributed (no consensus needed)
+        assert_eq!(status.status, AgentStatus::Distributed);
         assert!(status.distribution_status.is_some());
-
-        let dist = status.distribution_status.unwrap();
-        assert!(!dist.consensus_reached);
-        assert!(dist.obfuscated_hash.is_some());
-
-        // Top validators sign the hash
-        let hash = dist.obfuscated_hash.unwrap();
-
-        // First signature
-        let result1 =
-            handler.add_consensus_signature(&status.agent_hash, "v1", &hash, vec![1, 2, 3]);
-        assert!(result1.is_ok());
-        assert!(!result1.unwrap()); // Not enough yet
-
-        // Second signature - consensus reached
-        let result2 =
-            handler.add_consensus_signature(&status.agent_hash, "v2", &hash, vec![4, 5, 6]);
-        assert!(result2.is_ok());
-        assert!(result2.unwrap()); // Consensus!
-
-        // Verify obfuscated package is now available
-        let pkg = handler.get_obfuscated_package(&status.agent_hash);
-        assert!(pkg.is_some());
-
-        let pkg = pkg.unwrap();
-        assert_eq!(pkg.consensus_signatures.len(), 2);
     }
 
     #[tokio::test]
@@ -690,7 +683,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_source_package_authorization() {
-        // Use config with only 2 top validators
+        // All registered validators now get source access (simplified flow)
         let handler = AgentSubmissionHandler::new(
             RegistryConfig {
                 max_agents_per_epoch: 1.0,
@@ -698,27 +691,19 @@ mod tests {
                 ..Default::default()
             },
             WhitelistConfig::default(),
-            DistributionConfig {
-                top_validators_count: 2, // Only 2 top validators get source
-                ..Default::default()
-            },
+            DistributionConfig::default(),
         );
         handler.set_epoch(1);
 
         handler.update_validators(vec![
             ValidatorInfo {
-                hotkey: "top1".to_string(),
+                hotkey: "v1".to_string(),
                 stake: 1000,
                 is_root: false,
             },
             ValidatorInfo {
-                hotkey: "top2".to_string(),
+                hotkey: "v2".to_string(),
                 stake: 900,
-                is_root: false,
-            },
-            ValidatorInfo {
-                hotkey: "other".to_string(),
-                stake: 100,
                 is_root: false,
             },
         ]);
@@ -731,12 +716,15 @@ mod tests {
 
         let result = handler.submit(submission, 10000).await.unwrap();
 
-        // Top validator can get source
-        let source = handler.get_source_package(&result.agent_hash, "top1");
+        // All registered validators can get source
+        let source = handler.get_source_package(&result.agent_hash, "v1");
         assert!(source.is_some());
 
-        // Other validator (not in top 2) cannot get source
-        let source = handler.get_source_package(&result.agent_hash, "other");
+        let source = handler.get_source_package(&result.agent_hash, "v2");
+        assert!(source.is_some());
+
+        // Unknown validator cannot get source
+        let source = handler.get_source_package(&result.agent_hash, "unknown");
         assert!(source.is_none());
     }
 }

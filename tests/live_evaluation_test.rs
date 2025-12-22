@@ -288,7 +288,7 @@ fn test_full_evaluation_pipeline() {
     println!("FULL EVALUATION PIPELINE - Multiple Tasks");
     println!("================================================================\n");
 
-    let tasks = vec![
+    let tasks = [
         (
             "file_creation",
             "Create a Python script called 'hello.py' that prints 'Hello World'",
