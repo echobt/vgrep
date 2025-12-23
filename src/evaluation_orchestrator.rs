@@ -220,6 +220,7 @@ impl EvaluationOrchestrator {
     }
 
     /// Queue processor loop
+    #[allow(clippy::too_many_arguments)]
     async fn queue_processor_loop(
         controller: Arc<SubnetController>,
         chain_storage: Arc<ChainStorage>,
@@ -401,6 +402,7 @@ impl EvaluationOrchestrator {
     /// Tasks are run sequentially within an agent to avoid lifetime issues.
     /// Concurrency is achieved at the agent level (multiple agents run in parallel).
     /// Task progress is persisted to blockchain after each task for crash recovery.
+    #[allow(clippy::too_many_arguments)]
     async fn run_agent_evaluation(
         controller: Arc<SubnetController>,
         chain_storage: Arc<ChainStorage>,

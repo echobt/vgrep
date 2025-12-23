@@ -1,5 +1,9 @@
 //! Task evaluator for running agents against tasks
 //!
+//! ARCHITECTURE: Uses two Docker containers:
+//! 1. Agent container - base image with term_sdk, runs agent HTTP server
+//! 2. Task container - task-specific image, executes commands and tests
+//!
 //! SECURITY: All agent code executes INSIDE Docker containers, never on the host.
 //! Containers are non-privileged with limited resources.
 
@@ -10,6 +14,9 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
+
+/// Base image for agent container (has term_sdk installed)
+const AGENT_BASE_IMAGE: &str = "ghcr.io/platformnetwork/term-challenge:latest";
 
 /// Agent information
 #[derive(Clone, Debug, Default)]
@@ -49,6 +56,10 @@ impl TaskEvaluator {
 
     /// Evaluate an agent on a single task
     ///
+    /// ARCHITECTURE: Uses two containers:
+    /// - Agent container: base image with term_sdk, runs agent HTTP server
+    /// - Task container: task-specific image, executes commands and tests
+    ///
     /// SECURITY: Agent code runs INSIDE a non-privileged Docker container
     pub async fn evaluate_task(&self, task: &Task, agent: &AgentInfo) -> Result<TaskResult> {
         info!("Evaluating agent {} on task {}", agent.hash, task.id());
@@ -77,17 +88,68 @@ impl TaskEvaluator {
             .unwrap_or_else(|| detect_language(&code));
         info!("Agent language: {}", language);
 
-        // Create Docker config - NON-PRIVILEGED container
-        let docker_config = DockerConfig {
+        // ========== TASK CONTAINER (task-specific image) ==========
+        let task_config = DockerConfig {
             memory_limit: task.config.memory_limit.clone(),
             cpu_limit: task.config.cpu_limit,
             timeout_secs: task.config.timeout_secs as u64,
-            network_mode: task.config.network_mode.clone(),
+            network_mode: "bridge".to_string(),
             env: {
                 let mut env = task.config.env.clone();
                 env.push("TEST_DIR=/tests".to_string());
-                env.push("PYTHONUNBUFFERED=1".to_string());
-                // Add agent env vars
+                env
+            },
+            working_dir: "/app".to_string(),
+        };
+
+        let task_container = match self
+            .docker
+            .run_agent(
+                &task.config.docker_image,
+                &task.config.docker_image,
+                task.path.as_deref(),
+                &task_config,
+            )
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Failed to create task container: {}", e);
+                return Ok(TaskResult::failure(
+                    task.id().to_string(),
+                    agent.hash.clone(),
+                    start.elapsed().as_millis() as u64,
+                    String::new(),
+                    String::new(),
+                    format!("Failed to create task container: {}", e),
+                ));
+            }
+        };
+
+        if let Err(e) = task_container.start().await {
+            task_container.remove().await.ok();
+            return Ok(TaskResult::failure(
+                task.id().to_string(),
+                agent.hash.clone(),
+                start.elapsed().as_millis() as u64,
+                String::new(),
+                String::new(),
+                format!("Failed to start task container: {}", e),
+            ));
+        }
+
+        // ========== AGENT CONTAINER (base image with term_sdk) ==========
+        let agent_config = DockerConfig {
+            memory_limit: "2g".to_string(),
+            cpu_limit: 2.0,
+            timeout_secs: task.config.timeout_secs as u64,
+            network_mode: "bridge".to_string(),
+            env: {
+                let mut env = vec![
+                    "PYTHONUNBUFFERED=1".to_string(),
+                    "FORCE_HTTP_SERVER=1".to_string(),
+                    "AGENT_PORT=8765".to_string(),
+                ];
                 for (k, v) in &agent.env_vars {
                     env.push(format!("{}={}", k, v));
                 }
@@ -96,90 +158,71 @@ impl TaskEvaluator {
             working_dir: "/app".to_string(),
         };
 
-        // Create container from task's docker image
-        // The image should be based on term-base which has all SDKs
-        let container = match self
+        let agent_container = match self
             .docker
-            .run_agent(
-                &task.config.docker_image,
-                &task.config.docker_image, // Same image
-                task.path.as_deref(),
-                &docker_config,
-            )
+            .run_agent(AGENT_BASE_IMAGE, AGENT_BASE_IMAGE, None, &agent_config)
             .await
         {
             Ok(c) => c,
             Err(e) => {
-                error!("Failed to create container: {}", e);
+                error!("Failed to create agent container: {}", e);
+                task_container.stop().await.ok();
+                task_container.remove().await.ok();
                 return Ok(TaskResult::failure(
                     task.id().to_string(),
                     agent.hash.clone(),
                     start.elapsed().as_millis() as u64,
                     String::new(),
                     String::new(),
-                    format!("Failed to create container: {}", e),
+                    format!("Failed to create agent container: {}", e),
                 ));
             }
         };
 
-        // Start the container
-        if let Err(e) = container.start().await {
-            container.remove().await.ok();
+        if let Err(e) = agent_container.start().await {
+            agent_container.remove().await.ok();
+            task_container.stop().await.ok();
+            task_container.remove().await.ok();
             return Ok(TaskResult::failure(
                 task.id().to_string(),
                 agent.hash.clone(),
                 start.elapsed().as_millis() as u64,
                 String::new(),
                 String::new(),
-                format!("Failed to start container: {}", e),
+                format!("Failed to start agent container: {}", e),
             ));
         }
 
-        // Run setup script if present
+        // Setup task container
         if let Some(setup_script) = &task.setup_script {
-            debug!("Running setup script");
-            if let Err(e) = container.exec(&["sh", "-c", setup_script]).await {
+            debug!("Running setup script in task container");
+            if let Err(e) = task_container.exec(&["sh", "-c", setup_script]).await {
                 warn!("Setup script failed: {}", e);
             }
         }
 
-        // Copy test files to container
+        // Copy test files to task container
         if !task.test_files.is_empty() {
             debug!("Copying {} test files to /tests", task.test_files.len());
-            container.exec(&["mkdir", "-p", "/tests"]).await.ok();
+            task_container.exec(&["mkdir", "-p", "/tests"]).await.ok();
 
             for (filename, content) in &task.test_files {
                 let file_path = format!("/tests/{}", filename);
-                // Use base64 for safe content transfer
                 let encoded = base64::engine::general_purpose::STANDARD.encode(content);
                 let cmd = format!("echo '{}' | base64 -d > '{}'", encoded, file_path);
-                if let Err(e) = container.exec(&["sh", "-c", &cmd]).await {
+                if let Err(e) = task_container.exec(&["sh", "-c", &cmd]).await {
                     warn!("Failed to copy test file {}: {}", filename, e);
                 }
             }
         }
 
-        // Write instruction file
-        let instruction = task.instruction();
-        let encoded_instruction =
-            base64::engine::general_purpose::STANDARD.encode(instruction.as_bytes());
-        container
-            .exec(&[
-                "sh",
-                "-c",
-                &format!(
-                    "echo '{}' | base64 -d > /app/INSTRUCTION.txt",
-                    encoded_instruction
-                ),
-            ])
-            .await
-            .ok();
-
-        // SECURITY: Inject agent code into container (runs INSIDE Docker)
+        // Inject agent code into AGENT container (has term_sdk)
         info!("Injecting agent code ({} bytes, {})", code.len(), language);
-        if let Err(e) = container.inject_agent_code(&code, &language).await {
-            container.stop().await.ok();
-            container.remove().await.ok();
+        if let Err(e) = agent_container.inject_agent_code(&code, &language).await {
+            agent_container.stop().await.ok();
+            agent_container.remove().await.ok();
+            task_container.stop().await.ok();
+            task_container.remove().await.ok();
             return Ok(TaskResult::failure(
                 task.id().to_string(),
                 agent.hash.clone(),
@@ -190,16 +233,17 @@ impl TaskEvaluator {
             ));
         }
 
-        // Run the agent inside the container
+        // Run the agent with two-container architecture
+        let instruction = task.instruction();
         info!(
-            "Running agent in container (max_steps=50, timeout={}s)",
+            "Running agent (max_steps=50, timeout={}s)",
             task.config.timeout_secs
         );
         let harness_result = self
-            .run_agent_in_container(
-                &container,
+            .run_agent_with_task_container(
+                &agent_container,
+                &task_container,
                 &language,
-                &agent.env_vars,
                 instruction,
                 task.config.timeout_secs as u64,
                 50, // max_steps
@@ -227,7 +271,6 @@ impl TaskEvaluator {
             Err(e) => format!("Agent execution error: {}", e),
         };
 
-        // Log result
         match &harness_result {
             Ok((steps, task_complete)) => {
                 info!(
@@ -241,13 +284,17 @@ impl TaskEvaluator {
             }
         }
 
-        // Run the test script
-        info!("Running test script");
-        let test_result = container.run_test(&task.test_script).await;
+        // Cleanup agent container (no longer needed)
+        agent_container.stop().await.ok();
+        agent_container.remove().await.ok();
 
-        // Cleanup
-        container.stop().await.ok();
-        container.remove().await.ok();
+        // Run the test script in TASK container
+        info!("Running test script");
+        let test_result = task_container.run_test(&task.test_script).await;
+
+        // Cleanup task container
+        task_container.stop().await.ok();
+        task_container.remove().await.ok();
 
         let execution_time_ms = start.elapsed().as_millis() as u64;
 
@@ -294,18 +341,18 @@ impl TaskEvaluator {
         }
     }
 
-    /// Run the agent INSIDE the Docker container using HTTP server mode
+    /// Run the agent with two-container architecture
     ///
     /// This method:
-    /// 1. Starts the agent as a persistent HTTP server (port 8765)
+    /// 1. Starts the agent as HTTP server in AGENT container (has term_sdk)
     /// 2. Sends POST /step requests for each step
-    /// 3. Executes commands from agent responses in the same container
+    /// 3. Executes commands in TASK container (task-specific tools)
     /// 4. Returns results to the agent
-    async fn run_agent_in_container(
+    async fn run_agent_with_task_container(
         &self,
-        container: &ContainerRun,
+        agent_container: &ContainerRun,
+        task_container: &ContainerRun,
         language: &str,
-        env_vars: &[(String, String)],
         instruction: &str,
         timeout_secs: u64,
         max_steps: u32,
@@ -315,33 +362,27 @@ impl TaskEvaluator {
         let start_time = Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
 
-        // Start agent HTTP server (persistent process)
-        let env_exports = env_vars
-            .iter()
-            .map(|(k, v)| format!("export {}='{}'", k, v.replace('\'', "'\\''")))
-            .collect::<Vec<_>>()
-            .join("; ");
-
+        // Start agent HTTP server in AGENT container
         let start_cmd = match language {
             "python" | "py" => {
-                if env_exports.is_empty() {
-                    format!("FORCE_HTTP_SERVER=1 AGENT_PORT={} nohup python3 -B /agent/agent.py > /agent/stdout.log 2>/agent/stderr.log &", AGENT_PORT)
-                } else {
-                    format!("FORCE_HTTP_SERVER=1 AGENT_PORT={} nohup sh -c '{}; python3 -B /agent/agent.py' > /agent/stdout.log 2>/agent/stderr.log &", AGENT_PORT, env_exports)
-                }
+                "nohup python3 -B /agent/agent.py > /agent/stdout.log 2>/agent/stderr.log &"
             }
-            "typescript" | "ts" => format!("FORCE_HTTP_SERVER=1 AGENT_PORT={} nohup tsx /agent/agent.ts > /agent/stdout.log 2>/agent/stderr.log &", AGENT_PORT),
-            "javascript" | "js" => format!("FORCE_HTTP_SERVER=1 AGENT_PORT={} nohup node /agent/agent.js > /agent/stdout.log 2>/agent/stderr.log &", AGENT_PORT),
-            _ => format!("FORCE_HTTP_SERVER=1 AGENT_PORT={} nohup python3 -B /agent/agent.py > /agent/stdout.log 2>/agent/stderr.log &", AGENT_PORT),
+            "typescript" | "ts" => {
+                "nohup tsx /agent/agent.ts > /agent/stdout.log 2>/agent/stderr.log &"
+            }
+            "javascript" | "js" => {
+                "nohup node /agent/agent.js > /agent/stdout.log 2>/agent/stderr.log &"
+            }
+            _ => "nohup python3 -B /agent/agent.py > /agent/stdout.log 2>/agent/stderr.log &",
         };
 
-        container.exec(&["sh", "-c", &start_cmd]).await?;
+        agent_container.exec(&["sh", "-c", start_cmd]).await?;
 
         // Wait for agent HTTP server to be ready
         let mut agent_ready = false;
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let health_result = container
+            let health_result = agent_container
                 .exec(&[
                     "sh",
                     "-c",
@@ -358,7 +399,7 @@ impl TaskEvaluator {
 
         if !agent_ready {
             // Check stderr for errors
-            let log_result = container.exec(&["cat", "/agent/stderr.log"]).await;
+            let log_result = agent_container.exec(&["cat", "/agent/stderr.log"]).await;
             let stderr = log_result.map(|r| r.output()).unwrap_or_default();
             return Err(anyhow::anyhow!(
                 "Agent HTTP server failed to start: {}",
@@ -397,7 +438,7 @@ impl TaskEvaluator {
 
             debug!("Step {}: sending request to agent", step);
 
-            // Send POST request to agent HTTP server
+            // Send POST request to agent HTTP server (in AGENT container)
             let curl_cmd = format!(
                 "curl -s -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:{}/step",
                 request_json.replace('\'', "'\\''"),
@@ -407,7 +448,8 @@ impl TaskEvaluator {
             // Execute with timeout
             let step_timeout = Duration::from_secs(60);
             let exec_result =
-                tokio::time::timeout(step_timeout, container.exec(&["sh", "-c", &curl_cmd])).await;
+                tokio::time::timeout(step_timeout, agent_container.exec(&["sh", "-c", &curl_cmd]))
+                    .await;
 
             let agent_output = match exec_result {
                 Ok(Ok(result)) => result.output(),
@@ -447,9 +489,9 @@ impl TaskEvaluator {
                 break;
             }
 
-            // Execute command if provided
+            // Execute command in TASK container (has task-specific tools)
             let (output, exit_code) = if let Some(ref cmd) = response.command {
-                debug!("Executing command: {}", cmd);
+                debug!("Executing command in task container: {}", cmd);
 
                 // Handle cd specially
                 if cmd.trim().starts_with("cd ") {
@@ -460,8 +502,8 @@ impl TaskEvaluator {
                         format!("{}/{}", cwd, path)
                     };
 
-                    // Verify directory exists
-                    let check_result = container
+                    // Verify directory exists in task container
+                    let check_result = task_container
                         .exec(&["sh", "-c", &format!("cd '{}' && pwd", new_cwd)])
                         .await;
 
@@ -476,9 +518,9 @@ impl TaskEvaluator {
                         Err(e) => (format!("cd error: {}", e), 1),
                     }
                 } else {
-                    // Execute in current directory
+                    // Execute in task container's current directory
                     let full_cmd = format!("cd '{}' && {}", cwd, cmd);
-                    match container.exec(&["sh", "-c", &full_cmd]).await {
+                    match task_container.exec(&["sh", "-c", &full_cmd]).await {
                         Ok(result) => {
                             info!("Step {}: {} -> exit {}", step, cmd, result.exit_code);
                             (result.output(), result.exit_code)

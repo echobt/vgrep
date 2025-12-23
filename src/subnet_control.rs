@@ -149,6 +149,7 @@ pub fn key_evaluation_queue(validator_hotkey: &str) -> String {
 }
 
 /// Subnet controller - manages uploads and validation state
+#[allow(clippy::type_complexity)]
 pub struct SubnetController {
     /// Current control state
     state: RwLock<SubnetControlState>,
