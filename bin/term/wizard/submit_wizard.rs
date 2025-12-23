@@ -33,14 +33,49 @@ pub async fn run_submit_wizard(rpc_url: &str) -> Result<()> {
     // Step 1: Select agent file
     let agent_path = select_agent_file()?;
     let source = std::fs::read_to_string(&agent_path)?;
-    let agent_name = agent_path
-        .file_name()
+    let default_name = agent_path
+        .file_stem()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "agent.py".to_string());
+        .unwrap_or_else(|| "agent".to_string())
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect::<String>();
 
     println!();
     println!(
         "  {} Selected: {}",
+        style("✓").green(),
+        style(agent_path.file_name().unwrap_or_default().to_string_lossy()).cyan()
+    );
+
+    // Step 1b: Choose agent name
+    println!();
+    println!("  {}", style("Step 1b: Choose Agent Name").bold());
+    println!("  {}", style("(alphanumeric, dash, underscore only)").dim());
+    println!();
+
+    let agent_name: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("  Agent name")
+        .default(default_name)
+        .validate_with(|input: &String| -> Result<(), &str> {
+            if input.is_empty() {
+                return Err("Name cannot be empty");
+            }
+            if input.len() > 64 {
+                return Err("Name must be 64 characters or less");
+            }
+            if !input
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err("Name can only contain alphanumeric, dash, underscore");
+            }
+            Ok(())
+        })
+        .interact_text()?;
+
+    println!(
+        "  {} Agent name: {}",
         style("✓").green(),
         style(&agent_name).cyan()
     );
