@@ -25,7 +25,7 @@ Respond with JSON only: {"command": "your command here", "task_complete": false}
 
 STEP: {req.step}
 LAST OUTPUT:
-{req.output[-2000:] if req.output else "(no output yet)"}
+{req.get_output(2000) or "(no output yet)"}
 
 What command should I run next? (JSON only)"""
 

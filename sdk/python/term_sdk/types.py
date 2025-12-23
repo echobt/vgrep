@@ -81,6 +81,28 @@ class Request:
         """True if last command failed (exit_code != 0)."""
         return self.exit_code is not None and self.exit_code != 0
     
+    @property
+    def output_text(self) -> str:
+        """Get output as string, empty string if None. Safe for slicing."""
+        return self.output or ""
+    
+    def get_output(self, max_len: int = 3000, from_end: bool = True) -> str:
+        """
+        Get output truncated to max_len characters.
+        
+        Args:
+            max_len: Maximum length of output to return
+            from_end: If True, return last max_len chars; if False, return first max_len
+            
+        Returns:
+            Truncated output string, empty string if no output
+        """
+        if not self.output:
+            return ""
+        if len(self.output) <= max_len:
+            return self.output
+        return self.output[-max_len:] if from_end else self.output[:max_len]
+    
     def has(self, *patterns: str) -> bool:
         """Check if output contains any of the patterns."""
         if not self.output:

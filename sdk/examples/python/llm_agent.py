@@ -80,9 +80,8 @@ class LLMAgent(Agent):
             parts.append(f"EXIT CODE: {req.exit_code}")
             
             if req.output:
-                # Truncate long output
-                output = req.output[-3000:] if len(req.output) > 3000 else req.output
-                parts.append(f"OUTPUT:\n```\n{output}\n```")
+                # Use get_output() for safe truncated access
+                parts.append(f"OUTPUT:\n```\n{req.get_output(3000)}\n```")
         
         if req.failed:
             parts.append("\nWARNING: Last command failed! Try a different approach.")

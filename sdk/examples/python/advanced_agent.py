@@ -110,7 +110,7 @@ JSON response:"""
             current_step=current_step,
             last_command=req.last_command or "None",
             exit_code=req.exit_code if req.exit_code is not None else "N/A",
-            output=(req.output or "")[-2000:]  # Truncate long output
+            output=req.get_output(2000)  # Safe truncated access
         )
         
         try:

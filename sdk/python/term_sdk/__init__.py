@@ -24,7 +24,8 @@ With LLM:
             self.llm = LLM(model="z-ai/glm-4.5")
 
         def solve(self, req: Request) -> Response:
-            result = self.llm.ask(f"Task: {req.instruction}\\nOutput: {req.output}")
+            # Use get_output() for safe truncated access, or output_text for safe string
+            result = self.llm.ask(f"Task: {req.instruction}\\nOutput: {req.get_output(3000)}")
             return Response.from_llm(result.text)
 
     if __name__ == "__main__":
