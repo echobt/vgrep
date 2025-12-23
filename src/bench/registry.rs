@@ -176,12 +176,27 @@ impl RegistryClient {
             dataset.tasks.len()
         );
 
-        let mut task_paths = Vec::new();
+        // Download tasks in parallel (8 concurrent downloads)
+        use futures::stream::{self, StreamExt};
 
-        for task_source in &dataset.tasks {
-            let task_path = self.download_task(task_source, overwrite)?;
-            task_paths.push(task_path);
-        }
+        let cache_dir = self.cache_dir.clone();
+        let tasks: Vec<_> = dataset.tasks.clone();
+
+        let task_paths: Vec<PathBuf> = stream::iter(tasks)
+            .map(|task_source| {
+                let cache = cache_dir.clone();
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        download_task_impl(&task_source, &cache, overwrite)
+                    })
+                    .await?
+                }
+            })
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
 
         info!("Downloaded {} tasks", task_paths.len());
         Ok(task_paths)
@@ -189,78 +204,84 @@ impl RegistryClient {
 
     /// Download a single task
     pub fn download_task(&self, source: &TaskSource, overwrite: bool) -> Result<PathBuf> {
-        let cache_key = source.cache_key();
-        let task_dir = self.cache_dir.join(&source.name);
+        download_task_impl(source, &self.cache_dir, overwrite)
+    }
+}
 
-        // Check if already cached
-        if task_dir.exists() && !overwrite {
-            debug!("Task {} already cached at {:?}", source.name, task_dir);
-            return Ok(task_dir);
-        }
+/// Download a single task (standalone function for parallel downloads)
+fn download_task_impl(source: &TaskSource, cache_dir: &Path, overwrite: bool) -> Result<PathBuf> {
+    let task_dir = cache_dir.join(&source.name);
 
-        // Clean up if overwriting
-        if task_dir.exists() {
-            std::fs::remove_dir_all(&task_dir)?;
-        }
-
-        info!("Downloading task: {}", source.name);
-
-        // Clone to temp directory
-        let temp_dir = tempfile::tempdir()?;
-        let clone_dir = temp_dir.path().join("repo");
-
-        // Git clone
-        let mut cmd = Command::new("git");
-        cmd.arg("clone");
-
-        // Only use shallow clone if no specific commit needed
-        if source.git_commit_id.is_none() || source.git_commit_id.as_deref() == Some("head") {
-            cmd.arg("--depth").arg("1");
-        }
-
-        cmd.arg(&source.git_url).arg(&clone_dir);
-
-        let output = cmd
-            .output()
-            .with_context(|| format!("Failed to execute git clone for {}", source.name))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("Git clone failed for {}: {}", source.name, stderr);
-        }
-
-        // Checkout specific commit if needed
-        if let Some(commit) = &source.git_commit_id {
-            if commit != "head" {
-                let output = Command::new("git")
-                    .current_dir(&clone_dir)
-                    .args(["checkout", commit])
-                    .output()?;
-
-                if !output.status.success() {
-                    warn!("Failed to checkout commit {}, using HEAD", commit);
-                }
-            }
-        }
-
-        // Copy task directory to cache
-        let source_path = if source.path.is_empty() {
-            clone_dir
-        } else {
-            clone_dir.join(&source.path)
-        };
-
-        if !source_path.exists() {
-            bail!("Task path not found in repo: {:?}", source_path);
-        }
-
-        std::fs::create_dir_all(task_dir.parent().unwrap())?;
-        copy_dir_recursive(&source_path, &task_dir)?;
-
-        debug!("Task {} downloaded to {:?}", source.name, task_dir);
-        Ok(task_dir)
+    // Check if already cached
+    if task_dir.exists() && !overwrite {
+        debug!("Task {} already cached at {:?}", source.name, task_dir);
+        return Ok(task_dir);
     }
 
+    // Clean up if overwriting
+    if task_dir.exists() {
+        std::fs::remove_dir_all(&task_dir)?;
+    }
+
+    info!("Downloading task: {}", source.name);
+
+    // Clone to temp directory
+    let temp_dir = tempfile::tempdir()?;
+    let clone_dir = temp_dir.path().join("repo");
+
+    // Git clone
+    let mut cmd = Command::new("git");
+    cmd.arg("clone");
+
+    // Only use shallow clone if no specific commit needed
+    if source.git_commit_id.is_none() || source.git_commit_id.as_deref() == Some("head") {
+        cmd.arg("--depth").arg("1");
+    }
+
+    cmd.arg(&source.git_url).arg(&clone_dir);
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("Failed to execute git clone for {}", source.name))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Git clone failed for {}: {}", source.name, stderr);
+    }
+
+    // Checkout specific commit if needed
+    if let Some(commit) = &source.git_commit_id {
+        if commit != "head" {
+            let output = Command::new("git")
+                .current_dir(&clone_dir)
+                .args(["checkout", commit])
+                .output()?;
+
+            if !output.status.success() {
+                warn!("Failed to checkout commit {}, using HEAD", commit);
+            }
+        }
+    }
+
+    // Copy task directory to cache
+    let source_path = if source.path.is_empty() {
+        clone_dir
+    } else {
+        clone_dir.join(&source.path)
+    };
+
+    if !source_path.exists() {
+        bail!("Task path not found in repo: {:?}", source_path);
+    }
+
+    std::fs::create_dir_all(task_dir.parent().unwrap())?;
+    copy_dir_recursive(&source_path, &task_dir)?;
+
+    debug!("Task {} downloaded to {:?}", source.name, task_dir);
+    Ok(task_dir)
+}
+
+impl RegistryClient {
     /// Get all task paths for a dataset (downloading if needed)
     pub async fn get_task_paths(&mut self, name: &str, version: &str) -> Result<Vec<PathBuf>> {
         self.download_dataset(name, version, false).await
