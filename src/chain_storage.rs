@@ -356,6 +356,9 @@ impl Default for Leaderboard {
 
 // ==================== Chain Storage Manager ====================
 
+/// File name for persistent kv_store
+const KV_STORE_FILE: &str = "kv_store.json";
+
 /// Manages on-chain storage for term-challenge
 pub struct ChainStorage {
     /// Local cache of evaluation results
@@ -374,11 +377,14 @@ pub struct ChainStorage {
     current_block: Arc<RwLock<u64>>,
     /// Total validators count
     total_validators: Arc<RwLock<usize>>,
-    /// Generic key-value store for persistent state
+    /// Generic key-value store for persistent state (validator-specific, no P2P sync)
     kv_store: Arc<RwLock<HashMap<String, Vec<u8>>>>,
+    /// Data directory for persistence (None = in-memory only)
+    data_dir: Option<std::path::PathBuf>,
 }
 
 impl ChainStorage {
+    /// Create new in-memory storage (no persistence)
     pub fn new() -> Self {
         Self {
             results_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -390,6 +396,113 @@ impl ChainStorage {
             current_block: Arc::new(RwLock::new(0)),
             total_validators: Arc::new(RwLock::new(0)),
             kv_store: Arc::new(RwLock::new(HashMap::new())),
+            data_dir: None,
+        }
+    }
+
+    /// Create storage with disk persistence for kv_store
+    pub fn new_with_persistence(data_dir: std::path::PathBuf) -> Self {
+        // Ensure directory exists
+        if let Err(e) = std::fs::create_dir_all(&data_dir) {
+            tracing::warn!("Failed to create data directory {:?}: {}", data_dir, e);
+        }
+
+        // Load existing kv_store from disk
+        let kv_store = Self::load_kv_store(&data_dir);
+        let loaded_count = kv_store.len();
+
+        if loaded_count > 0 {
+            tracing::info!(
+                "Loaded {} keys from persistent storage at {:?}",
+                loaded_count,
+                data_dir
+            );
+        }
+
+        Self {
+            results_cache: Arc::new(RwLock::new(HashMap::new())),
+            votes_cache: Arc::new(RwLock::new(HashMap::new())),
+            consensus_cache: Arc::new(RwLock::new(HashMap::new())),
+            leaderboard: Arc::new(RwLock::new(Leaderboard::new())),
+            pending_submissions: Arc::new(RwLock::new(Vec::new())),
+            current_epoch: Arc::new(RwLock::new(0)),
+            current_block: Arc::new(RwLock::new(0)),
+            total_validators: Arc::new(RwLock::new(0)),
+            kv_store: Arc::new(RwLock::new(kv_store)),
+            data_dir: Some(data_dir),
+        }
+    }
+
+    /// Load kv_store from disk
+    fn load_kv_store(data_dir: &std::path::Path) -> HashMap<String, Vec<u8>> {
+        let path = data_dir.join(KV_STORE_FILE);
+        if !path.exists() {
+            return HashMap::new();
+        }
+
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                // Stored as HashMap<String, String> where value is base64-encoded bytes
+                match serde_json::from_str::<HashMap<String, String>>(&content) {
+                    Ok(encoded) => encoded
+                        .into_iter()
+                        .filter_map(|(k, v)| {
+                            use base64::Engine;
+                            base64::engine::general_purpose::STANDARD
+                                .decode(&v)
+                                .ok()
+                                .map(|bytes| (k, bytes))
+                        })
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!("Failed to parse kv_store file: {}", e);
+                        HashMap::new()
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read kv_store file: {}", e);
+                HashMap::new()
+            }
+        }
+    }
+
+    /// Save kv_store to disk (called after every write)
+    fn save_kv_store(&self) {
+        let Some(data_dir) = &self.data_dir else {
+            return; // No persistence configured
+        };
+
+        let path = data_dir.join(KV_STORE_FILE);
+        let store = self.kv_store.read();
+
+        // Encode bytes as base64 for JSON storage
+        use base64::Engine;
+        let encoded: HashMap<String, String> = store
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    base64::engine::general_purpose::STANDARD.encode(v),
+                )
+            })
+            .collect();
+
+        match serde_json::to_string_pretty(&encoded) {
+            Ok(json) => {
+                // Write to temp file then rename for atomicity
+                let temp_path = path.with_extension("json.tmp");
+                if let Err(e) = std::fs::write(&temp_path, &json) {
+                    tracing::warn!("Failed to write kv_store temp file: {}", e);
+                    return;
+                }
+                if let Err(e) = std::fs::rename(&temp_path, &path) {
+                    tracing::warn!("Failed to rename kv_store file: {}", e);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to serialize kv_store: {}", e);
+            }
         }
     }
 
@@ -416,10 +529,11 @@ impl ChainStorage {
             .and_then(|bytes| serde_json::from_slice(bytes).ok())
     }
 
-    /// Set JSON value in key-value store
+    /// Set JSON value in key-value store (persisted to disk if configured)
     pub fn set_json<T: serde::Serialize>(&self, key: &str, value: &T) -> Result<(), String> {
         let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
         self.kv_store.write().insert(key.to_string(), bytes);
+        self.save_kv_store();
         Ok(())
     }
 
@@ -428,14 +542,19 @@ impl ChainStorage {
         self.kv_store.read().get(key).cloned()
     }
 
-    /// Set raw bytes in key-value store
+    /// Set raw bytes in key-value store (persisted to disk if configured)
     pub fn set_bytes(&self, key: &str, value: Vec<u8>) {
         self.kv_store.write().insert(key.to_string(), value);
+        self.save_kv_store();
     }
 
-    /// Remove key from store
+    /// Remove key from store (persisted to disk if configured)
     pub fn remove(&self, key: &str) -> Option<Vec<u8>> {
-        self.kv_store.write().remove(key)
+        let result = self.kv_store.write().remove(key);
+        if result.is_some() {
+            self.save_kv_store();
+        }
+        result
     }
 
     /// Store evaluation result (local + queue for broadcast)

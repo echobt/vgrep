@@ -154,7 +154,14 @@ async fn main() -> Result<()> {
     );
 
     let progress_store = Arc::new(ProgressStore::new());
-    let chain_storage = Arc::new(ChainStorage::new());
+
+    // Create chain storage with disk persistence for evaluation state recovery
+    let data_path = std::path::PathBuf::from(&args.data_dir);
+    let chain_storage = Arc::new(ChainStorage::new_with_persistence(data_path));
+    info!(
+        "Chain storage initialized with persistence at {}",
+        args.data_dir
+    );
 
     // Create P2P broadcaster for platform validator communication
     let p2p_broadcaster = Arc::new(HttpP2PBroadcaster::new(validator_hotkey.clone()));
