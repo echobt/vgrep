@@ -315,6 +315,23 @@ pytest test_outputs.py -v
             .map(|t| t as u64)
             .unwrap_or(300);
 
+        // Get environment config (terminal-bench format)
+        let environment = toml_value.get("environment");
+        let docker_image = environment
+            .and_then(|e| e.get("docker_image"))
+            .and_then(|d| d.as_str())
+            .unwrap_or("ghcr.io/platformnetwork/term-challenge:latest")
+            .to_string();
+        let memory_limit = environment
+            .and_then(|e| e.get("memory"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("2G")
+            .to_string();
+        let cpu_limit = environment
+            .and_then(|e| e.get("cpus"))
+            .and_then(|c| c.as_float().or_else(|| c.as_integer().map(|i| i as f64)))
+            .unwrap_or(1.0);
+
         Ok(TaskConfig {
             id: task_name.clone(),
             name: task_name,
@@ -323,9 +340,9 @@ pytest test_outputs.py -v
             difficulty,
             timeout_secs: timeout as f64,
             test_timeout_secs: 30.0,
-            memory_limit: "2g".to_string(),
-            cpu_limit: 1.0,
-            docker_image: "ghcr.io/platformnetwork/term-challenge:latest".to_string(),
+            memory_limit,
+            cpu_limit,
+            docker_image,
             network_mode: "bridge".to_string(),
             env: vec![],
             test_scripts: vec![],
