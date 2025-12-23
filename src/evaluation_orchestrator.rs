@@ -309,7 +309,6 @@ impl EvaluationOrchestrator {
                     .await;
                 });
             }
-            drop(task_registry.read()); // Release lock before processing pending
 
             // Process pending agents
             let pending = controller.get_next_agents(MAX_CONCURRENT_AGENTS);
