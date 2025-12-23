@@ -485,15 +485,71 @@ impl ExternalAgent {
 
         debug!("POST {} (step {})", url, request.step);
 
-        // Send HTTP request
-        let response = self
-            .http_client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .body(request_json)
-            .send()
-            .await
-            .context("Failed to send request to agent")?;
+        // Send HTTP request with retry
+        let mut last_error = None;
+        let mut response = None;
+
+        for attempt in 0..3 {
+            match self
+                .http_client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .body(request_json.clone())
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    response = Some(resp);
+                    break;
+                }
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < 2 {
+                        debug!("Request failed, retrying... (attempt {})", attempt + 1);
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                }
+            }
+        }
+
+        let response = match response {
+            Some(r) => r,
+            None => {
+                // Get agent logs for debugging
+                let stderr = self
+                    .exec_in_container(&container_id, &["cat", "/agent/stderr.log"])
+                    .await
+                    .map(|(_, s)| s)
+                    .unwrap_or_default();
+                let stdout = self
+                    .exec_in_container(&container_id, &["cat", "/agent/stdout.log"])
+                    .await
+                    .map(|(_, s)| s)
+                    .unwrap_or_default();
+
+                // Check if agent process is still running
+                let ps_out = self
+                    .exec_in_container(&container_id, &["pgrep", "-f", "python"])
+                    .await
+                    .map(|(_, s)| s)
+                    .unwrap_or_default();
+
+                let process_status = if ps_out.trim().is_empty() {
+                    "Agent process NOT running (crashed?)"
+                } else {
+                    "Agent process is running"
+                };
+
+                bail!(
+                    "Failed to send request to agent (step {}): {}\n{}\nStderr: {}\nStdout: {}",
+                    request.step,
+                    last_error.map(|e| e.to_string()).unwrap_or_default(),
+                    process_status,
+                    stderr,
+                    stdout
+                );
+            }
+        };
 
         // Get stderr logs (agent logging)
         let (_, stderr) = self
