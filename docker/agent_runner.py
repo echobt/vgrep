@@ -176,9 +176,9 @@ def run_agent(code: str, env_vars: dict = None):
             response = process.stdout.readline()
             if not response:
                 print("[runner] Agent returned empty response", file=sys.stderr)
-                # Return a default done response
-                print('{"command": null, "task_complete": true}', flush=True)
-                break
+                # Return error command, not done - give it another chance
+                print('{"command": "echo \'ERROR: Agent returned empty response\'", "task_complete": false}', flush=True)
+                continue
             
             # Forward response to harness
             print(response.strip(), flush=True)

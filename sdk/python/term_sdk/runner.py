@@ -79,10 +79,13 @@ class AgentHandler(BaseHTTPRequestHandler):
                 self.wfile.write(response_json.encode('utf-8'))
                 
             except Exception as e:
-                log_error(f"Error: {e}")
+                log_error(f"Error in solve(): {e}")
                 traceback.print_exc(file=sys.stderr)
-                error_response = Response.done().to_json()
-                self.send_response(500)
+                # Return error command, NOT task_complete - let agent retry
+                error_response = Response.cmd(
+                    f"echo 'AGENT ERROR: {str(e)[:100]}'"
+                ).to_json()
+                self.send_response(200)  # 200 so harness processes it
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Content-Length', len(error_response))
                 self.end_headers()
@@ -180,6 +183,9 @@ def run_stdio(agent: Agent) -> None:
     """
     Run agent in stdin/stdout mode (legacy, single request).
     """
+    error_count = 0
+    max_errors = 5  # Don't let errors loop forever
+    
     try:
         agent.setup()
         
@@ -192,13 +198,22 @@ def run_stdio(agent: Agent) -> None:
                 request = Request.parse(line)
                 response = agent.solve(request)
                 print(response.to_json(), flush=True)
+                error_count = 0  # Reset on success
                 
                 if response.task_complete:
                     break
             except Exception as e:
-                log_error(f"Error: {e}")
-                print(Response.done().to_json(), flush=True)
-                break
+                error_count += 1
+                log_error(f"Error in solve(): {e}")
+                traceback.print_exc(file=sys.stderr)
+                
+                if error_count >= max_errors:
+                    log_error(f"Too many errors ({max_errors}), giving up")
+                    print(Response.done().to_json(), flush=True)
+                    break
+                
+                # Return error command, not done
+                print(Response.cmd(f"echo 'AGENT ERROR: {str(e)[:100]}'").to_json(), flush=True)
         
         agent.cleanup()
         

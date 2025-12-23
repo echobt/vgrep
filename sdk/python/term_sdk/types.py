@@ -197,8 +197,14 @@ class Response:
         Parse response from LLM output.
         
         Extracts JSON from LLM response text.
+        If parsing fails, returns error message instead of task_complete.
         """
+        if not text or not text.strip():
+            # Empty response - return error, don't complete task
+            return cls.cmd("echo 'ERROR: Empty LLM response, retrying...'")
+        
         text = text.strip()
+        original_text = text
         
         # Remove markdown code blocks
         if "```" in text:
@@ -213,16 +219,34 @@ class Response:
         if start >= 0 and end > start:
             try:
                 data = json.loads(text[start:end + 1])
+                command = data.get("command")
+                task_complete = data.get("task_complete", False)
+                
+                # Validate: if task_complete with a command, that's invalid
+                if task_complete and command:
+                    # Interpret as: run this final command, then complete
+                    return cls(
+                        command=command,
+                        text=data.get("text"),
+                        task_complete=False,  # Don't complete yet, run the command first
+                        data=data.get("data"),
+                    )
+                
                 return cls(
-                    command=data.get("command"),
+                    command=command,
                     text=data.get("text"),
-                    task_complete=data.get("task_complete", False),
+                    task_complete=task_complete,
                     data=data.get("data"),
                 )
-            except json.JSONDecodeError:
-                pass
+            except json.JSONDecodeError as e:
+                # Failed to parse JSON - echo error but don't complete
+                import sys
+                print(f"[sdk] JSON parse error: {e}", file=sys.stderr)
+                print(f"[sdk] Raw text: {original_text[:200]}", file=sys.stderr)
         
-        return cls.done()
+        # Could not parse - return diagnostic command instead of completing
+        # This gives the agent another chance
+        return cls.cmd("echo 'ERROR: Could not parse LLM response as JSON'")
 
 
 @dataclass
