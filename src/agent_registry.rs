@@ -45,11 +45,11 @@ pub struct RegistryConfig {
 impl Default for RegistryConfig {
     fn default() -> Self {
         Self {
-            max_agents_per_epoch: 0.5,        // 1 agent per 2 epochs
-            min_stake_rao: 1_000_000_000_000, // 1000 TAO
-            max_code_size: 1024 * 1024,       // 1MB
+            max_agents_per_epoch: 0.333, // 1 agent per 3 epochs
+            min_stake_rao: 0,            // No minimum stake required
+            max_code_size: 1024 * 1024,  // 1MB
             rejection_cooldown_epochs: 5,
-            stake_weighted_limits: true,
+            stake_weighted_limits: false, // Disabled since no stake required
         }
     }
 }
