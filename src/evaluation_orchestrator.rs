@@ -14,8 +14,8 @@ use crate::chain_storage::ChainStorage;
 use crate::config::ChallengeConfig;
 use crate::evaluator::{AgentInfo, TaskEvaluator};
 use crate::subnet_control::{
-    ControlError, EvaluatingAgent, EvaluationQueueState, PendingAgent, SubnetControlState,
-    SubnetController, KEY_EVALUATION_QUEUE, KEY_SUBNET_CONTROL, MAX_CONCURRENT_AGENTS,
+    key_evaluation_queue, key_subnet_control, ControlError, EvaluatingAgent, EvaluationQueueState,
+    PendingAgent, SubnetControlState, SubnetController, MAX_CONCURRENT_AGENTS,
     MAX_CONCURRENT_TASKS, MAX_TASKS_PER_AGENT,
 };
 use crate::task::{Task, TaskRegistry, TaskResult};
@@ -128,16 +128,19 @@ impl EvaluationOrchestrator {
     pub async fn initialize(&self) -> Result<(), ControlError> {
         info!("Initializing evaluation orchestrator...");
 
-        // Load subnet control state
+        // Load subnet control state (validator-specific)
+        let control_key = key_subnet_control(&self.validator_hotkey);
+        let queue_key = key_evaluation_queue(&self.validator_hotkey);
+
         let control_state = self
             .chain_storage
-            .get_json::<SubnetControlState>(KEY_SUBNET_CONTROL)
+            .get_json::<SubnetControlState>(&control_key)
             .unwrap_or_default();
 
-        // Load queue state
+        // Load queue state (validator-specific)
         let queue_state = self
             .chain_storage
-            .get_json::<EvaluationQueueState>(KEY_EVALUATION_QUEUE)
+            .get_json::<EvaluationQueueState>(&queue_key)
             .unwrap_or_default();
 
         // Load into controller
@@ -158,22 +161,18 @@ impl EvaluationOrchestrator {
         Ok(())
     }
 
-    /// Save state to chain storage
+    /// Save state to chain storage (validator-specific)
     fn save_state(&self) {
         let control_state = self.controller.get_state();
         let queue_state = self.controller.get_queue_state();
+        let control_key = key_subnet_control(&self.validator_hotkey);
+        let queue_key = key_evaluation_queue(&self.validator_hotkey);
 
-        if let Err(e) = self
-            .chain_storage
-            .set_json(KEY_SUBNET_CONTROL, &control_state)
-        {
+        if let Err(e) = self.chain_storage.set_json(&control_key, &control_state) {
             error!("Failed to save control state: {}", e);
         }
 
-        if let Err(e) = self
-            .chain_storage
-            .set_json(KEY_EVALUATION_QUEUE, &queue_state)
-        {
+        if let Err(e) = self.chain_storage.set_json(&queue_key, &queue_state) {
             error!("Failed to save queue state: {}", e);
         }
     }
@@ -232,6 +231,8 @@ impl EvaluationOrchestrator {
         validator_hotkey: String,
     ) {
         let mut last_save = std::time::Instant::now();
+        let mut resumed_agents: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         loop {
             if !running.load(Ordering::Relaxed) {
@@ -245,6 +246,70 @@ impl EvaluationOrchestrator {
                 tokio::time::sleep(Duration::from_secs(QUEUE_PROCESS_INTERVAL_SECS)).await;
                 continue;
             }
+
+            // Resume evaluating agents that were in progress (run once per agent)
+            let evaluating = controller.get_evaluating_agents();
+            for agent in evaluating {
+                if resumed_agents.contains(&agent.agent_hash) {
+                    continue; // Already resumed
+                }
+
+                // Check task registry is loaded
+                let registry_guard = task_registry.read();
+                let registry = match registry_guard.as_ref() {
+                    Some(r) => r,
+                    None => continue,
+                };
+
+                // Get source code
+                let source_code = match source_provider.get_source_code(&agent.agent_hash) {
+                    Some(code) => code,
+                    None => {
+                        warn!("No source code for resuming agent {}", agent.agent_hash);
+                        continue;
+                    }
+                };
+
+                let miner_hotkey = source_provider
+                    .get_miner_hotkey(&agent.agent_hash)
+                    .unwrap_or(agent.miner_hotkey.clone());
+
+                info!(
+                    "Resuming evaluation for agent {} ({}/{} tasks completed)",
+                    agent.agent_hash,
+                    agent.completed_task_ids.len(),
+                    agent.total_tasks
+                );
+
+                resumed_agents.insert(agent.agent_hash.clone());
+
+                // Spawn resume task
+                let controller_clone = Arc::clone(&controller);
+                let chain_storage_clone = Arc::clone(&chain_storage);
+                let config_clone = config.clone();
+                let result_tx_clone = result_tx.clone();
+                let agent_hash = agent.agent_hash.clone();
+                let evaluation_id = agent.evaluation_id.clone();
+                let validator_hotkey_clone = validator_hotkey.clone();
+                let tasks: Vec<Task> = registry.tasks().cloned().collect();
+
+                tokio::spawn(async move {
+                    Self::run_agent_evaluation(
+                        controller_clone,
+                        chain_storage_clone,
+                        validator_hotkey_clone,
+                        agent_hash,
+                        miner_hotkey,
+                        source_code,
+                        evaluation_id,
+                        tasks,
+                        config_clone,
+                        result_tx_clone,
+                    )
+                    .await;
+                });
+            }
+            drop(task_registry.read()); // Release lock before processing pending
 
             // Process pending agents
             let pending = controller.get_next_agents(MAX_CONCURRENT_AGENTS);
@@ -287,14 +352,18 @@ impl EvaluationOrchestrator {
 
                 // Spawn evaluation task
                 let controller_clone = Arc::clone(&controller);
+                let chain_storage_clone = Arc::clone(&chain_storage);
                 let config_clone = config.clone();
                 let result_tx_clone = result_tx.clone();
                 let agent_hash = agent.agent_hash.clone();
+                let validator_hotkey_clone = validator_hotkey.clone();
                 let tasks: Vec<Task> = registry.tasks().cloned().collect();
 
                 tokio::spawn(async move {
                     Self::run_agent_evaluation(
                         controller_clone,
+                        chain_storage_clone,
+                        validator_hotkey_clone,
                         agent_hash,
                         miner_hotkey,
                         source_code,
@@ -307,15 +376,17 @@ impl EvaluationOrchestrator {
                 });
             }
 
-            // Periodic state save
+            // Periodic state save (validator-specific keys)
             if last_save.elapsed() > Duration::from_secs(STATE_SAVE_INTERVAL_SECS) {
                 let control_state = controller.get_state();
                 let queue_state = controller.get_queue_state();
+                let control_key = key_subnet_control(&validator_hotkey);
+                let queue_key = key_evaluation_queue(&validator_hotkey);
 
-                if let Err(e) = chain_storage.set_json(KEY_SUBNET_CONTROL, &control_state) {
+                if let Err(e) = chain_storage.set_json(&control_key, &control_state) {
                     error!("Failed to save control state: {}", e);
                 }
-                if let Err(e) = chain_storage.set_json(KEY_EVALUATION_QUEUE, &queue_state) {
+                if let Err(e) = chain_storage.set_json(&queue_key, &queue_state) {
                     error!("Failed to save queue state: {}", e);
                 }
 
@@ -330,8 +401,11 @@ impl EvaluationOrchestrator {
     ///
     /// Tasks are run sequentially within an agent to avoid lifetime issues.
     /// Concurrency is achieved at the agent level (multiple agents run in parallel).
+    /// Task progress is persisted to blockchain after each task for crash recovery.
     async fn run_agent_evaluation(
         controller: Arc<SubnetController>,
+        chain_storage: Arc<ChainStorage>,
+        validator_hotkey: String,
         agent_hash: String,
         miner_hotkey: String,
         source_code: String,
@@ -377,12 +451,38 @@ impl EvaluationOrchestrator {
             .collect();
 
         let total_tasks = tasks_to_run.len();
-        let mut completed = 0;
-        let mut passed = 0;
-        let mut failed = 0;
+
+        // Get already completed tasks (for resume after restart)
+        let completed_task_ids = controller.get_completed_task_ids(&agent_hash);
+        let (mut passed, mut failed) =
+            if let Some((p, f, _)) = controller.get_evaluation_progress(&agent_hash) {
+                (p, f)
+            } else {
+                (0, 0)
+            };
+
+        if !completed_task_ids.is_empty() {
+            info!(
+                "Resuming evaluation for agent {} from task {}/{}",
+                agent_hash,
+                completed_task_ids.len(),
+                total_tasks
+            );
+        }
 
         // Run tasks sequentially (concurrency is at agent level, not task level)
         for task in &tasks_to_run {
+            let task_id = task.id().to_string();
+
+            // Skip already completed tasks (resume support)
+            if completed_task_ids.contains(&task_id) {
+                debug!(
+                    "Skipping already completed task {} for {}",
+                    task_id, agent_hash
+                );
+                continue;
+            }
+
             // Acquire global task slot
             let slots = controller.acquire_task_slots(&agent_hash, 1);
             if slots == 0 {
@@ -399,33 +499,41 @@ impl EvaluationOrchestrator {
             }
 
             // Run the task
-            match evaluator.evaluate_task(task, &agent_info).await {
+            let task_passed = match evaluator.evaluate_task(task, &agent_info).await {
                 Ok(result) => {
-                    completed += 1;
                     if result.passed {
                         passed += 1;
+                        true
                     } else {
                         failed += 1;
+                        false
                     }
                 }
                 Err(e) => {
-                    completed += 1;
                     failed += 1;
                     warn!(
                         "Task {} evaluation error for {}: {}",
-                        task.id(),
-                        agent_hash,
-                        e
+                        task_id, agent_hash, e
                     );
+                    false
                 }
-            }
+            };
 
             // Release task slot
             controller.release_task_slots(1);
 
-            // Update progress
-            controller.update_agent_tasks(&agent_hash, 0, completed);
+            // Record task completion (persisted to blockchain for resume)
+            controller.record_task_completion(&agent_hash, &task_id, task_passed);
+
+            // Save to blockchain immediately for crash recovery (validator-specific)
+            let queue_state = controller.get_queue_state();
+            let queue_key = key_evaluation_queue(&validator_hotkey);
+            if let Err(e) = chain_storage.set_json(&queue_key, &queue_state) {
+                warn!("Failed to save task progress to chain: {}", e);
+            }
         }
+
+        let completed = passed + failed;
 
         // Calculate final score
         let score = if total_tasks > 0 {

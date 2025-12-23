@@ -89,7 +89,7 @@ pub struct EvaluatingAgent {
     pub miner_hotkey: String,
     /// Evaluation started at
     pub started_at: DateTime<Utc>,
-    /// Current task count
+    /// Current task count (in progress)
     pub current_tasks: usize,
     /// Completed task count
     pub completed_tasks: usize,
@@ -99,6 +99,15 @@ pub struct EvaluatingAgent {
     pub last_activity: DateTime<Utc>,
     /// Evaluation ID
     pub evaluation_id: String,
+    /// IDs of completed tasks (for resume after restart)
+    #[serde(default)]
+    pub completed_task_ids: Vec<String>,
+    /// IDs of passed tasks
+    #[serde(default)]
+    pub passed_task_ids: Vec<String>,
+    /// IDs of failed tasks
+    #[serde(default)]
+    pub failed_task_ids: Vec<String>,
 }
 
 /// Evaluation queue state - persisted for recovery
@@ -125,9 +134,19 @@ impl Default for EvaluationQueueState {
     }
 }
 
-/// Chain storage keys
-pub const KEY_SUBNET_CONTROL: &str = "subnet_control";
-pub const KEY_EVALUATION_QUEUE: &str = "evaluation_queue";
+/// Chain storage key prefixes (validator-specific)
+pub const KEY_SUBNET_CONTROL_PREFIX: &str = "subnet_control";
+pub const KEY_EVALUATION_QUEUE_PREFIX: &str = "evaluation_queue";
+
+/// Get validator-specific chain storage key for subnet control
+pub fn key_subnet_control(validator_hotkey: &str) -> String {
+    format!("{}:{}", KEY_SUBNET_CONTROL_PREFIX, validator_hotkey)
+}
+
+/// Get validator-specific chain storage key for evaluation queue
+pub fn key_evaluation_queue(validator_hotkey: &str) -> String {
+    format!("{}:{}", KEY_EVALUATION_QUEUE_PREFIX, validator_hotkey)
+}
 
 /// Subnet controller - manages uploads and validation state
 pub struct SubnetController {
@@ -395,6 +414,9 @@ impl SubnetController {
             total_tasks,
             last_activity: Utc::now(),
             evaluation_id: evaluation_id.to_string(),
+            completed_task_ids: Vec::new(),
+            passed_task_ids: Vec::new(),
+            failed_task_ids: Vec::new(),
         };
 
         queue.evaluating.push(evaluating);
@@ -437,6 +459,82 @@ impl SubnetController {
                 cb(&queue);
             }
         }
+    }
+
+    /// Record task completion for an agent (persisted for resume)
+    pub fn record_task_completion(&self, agent_hash: &str, task_id: &str, passed: bool) {
+        let mut queue = self.queue_state.write();
+
+        let mut found = false;
+        let mut completed_count = 0;
+        let mut total_count = 0;
+
+        if let Some(agent) = queue
+            .evaluating
+            .iter_mut()
+            .find(|a| a.agent_hash == agent_hash)
+        {
+            // Add to completed
+            if !agent.completed_task_ids.contains(&task_id.to_string()) {
+                agent.completed_task_ids.push(task_id.to_string());
+                agent.completed_tasks = agent.completed_task_ids.len();
+
+                if passed {
+                    agent.passed_task_ids.push(task_id.to_string());
+                } else {
+                    agent.failed_task_ids.push(task_id.to_string());
+                }
+            }
+
+            agent.last_activity = Utc::now();
+            completed_count = agent.completed_tasks;
+            total_count = agent.total_tasks;
+            found = true;
+        }
+
+        if found {
+            queue.last_saved = Utc::now();
+
+            debug!(
+                "Task {} {} for agent {} ({}/{} completed)",
+                task_id,
+                if passed { "passed" } else { "failed" },
+                agent_hash,
+                completed_count,
+                total_count
+            );
+
+            if let Some(cb) = &self.on_queue_change {
+                cb(&queue);
+            }
+        }
+    }
+
+    /// Get completed task IDs for an agent (for resume)
+    pub fn get_completed_task_ids(&self, agent_hash: &str) -> Vec<String> {
+        let queue = self.queue_state.read();
+        queue
+            .evaluating
+            .iter()
+            .find(|a| a.agent_hash == agent_hash)
+            .map(|a| a.completed_task_ids.clone())
+            .unwrap_or_default()
+    }
+
+    /// Get evaluation progress for an agent
+    pub fn get_evaluation_progress(&self, agent_hash: &str) -> Option<(usize, usize, usize)> {
+        let queue = self.queue_state.read();
+        queue
+            .evaluating
+            .iter()
+            .find(|a| a.agent_hash == agent_hash)
+            .map(|a| {
+                (
+                    a.passed_task_ids.len(),
+                    a.failed_task_ids.len(),
+                    a.total_tasks,
+                )
+            })
     }
 
     /// Complete evaluation for an agent
@@ -545,6 +643,11 @@ impl SubnetController {
     /// Get evaluating agent count
     pub fn evaluating_count(&self) -> usize {
         self.queue_state.read().evaluating.len()
+    }
+
+    /// Get list of evaluating agents (for resume after restart)
+    pub fn get_evaluating_agents(&self) -> Vec<EvaluatingAgent> {
+        self.queue_state.read().evaluating.clone()
     }
 
     /// Get current concurrent tasks
