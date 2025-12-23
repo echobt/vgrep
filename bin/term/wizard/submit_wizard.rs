@@ -587,7 +587,7 @@ async fn submit_agent(
     };
 
     let client = reqwest::Client::new();
-    let url = format!("{}/submit", rpc_url);
+    let url = format!("{}/challenge/term-challenge/submit", rpc_url);
 
     let resp = client
         .post(&url)

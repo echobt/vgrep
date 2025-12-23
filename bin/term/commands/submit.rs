@@ -416,7 +416,7 @@ async fn submit_agent(
         api_keys,
     };
 
-    let url = format!("{}/submit", rpc_url);
+    let url = format!("{}/challenge/term-challenge/submit", rpc_url);
 
     let response = client
         .post(&url)

@@ -94,7 +94,7 @@ async fn fetch_network_status(rpc_url: &str) -> Result<NetworkStatus> {
     };
 
     // Try to fetch stats
-    let stats_url = format!("{}/stats", rpc_url);
+    let stats_url = format!("{}/challenge/term-challenge/stats", rpc_url);
     let (active_agents, epoch) = match client
         .get(&stats_url)
         .timeout(std::time::Duration::from_secs(5))
