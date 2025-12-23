@@ -294,11 +294,11 @@ impl TaskEvaluator {
         }
     }
 
-    /// Run the agent INSIDE the Docker container
+    /// Run the agent INSIDE the Docker container using HTTP server mode
     ///
     /// This method:
-    /// 1. Starts the agent process inside the container
-    /// 2. Sends requests via stdin, receives responses via stdout
+    /// 1. Starts the agent as a persistent HTTP server (port 8765)
+    /// 2. Sends POST /step requests for each step
     /// 3. Executes commands from agent responses in the same container
     /// 4. Returns results to the agent
     async fn run_agent_in_container(
@@ -310,8 +310,63 @@ impl TaskEvaluator {
         timeout_secs: u64,
         max_steps: u32,
     ) -> Result<(Vec<(Option<String>, String, i32)>, bool)> {
+        const AGENT_PORT: u16 = 8765;
+
         let start_time = Instant::now();
         let timeout = Duration::from_secs(timeout_secs);
+
+        // Start agent HTTP server (persistent process)
+        let env_exports = env_vars
+            .iter()
+            .map(|(k, v)| format!("export {}='{}'", k, v.replace('\'', "'\\''")))
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        let start_cmd = match language {
+            "python" | "py" => {
+                if env_exports.is_empty() {
+                    format!("FORCE_HTTP_SERVER=1 AGENT_PORT={} nohup python3 -B /agent/agent.py > /agent/stdout.log 2>/agent/stderr.log &", AGENT_PORT)
+                } else {
+                    format!("FORCE_HTTP_SERVER=1 AGENT_PORT={} nohup sh -c '{}; python3 -B /agent/agent.py' > /agent/stdout.log 2>/agent/stderr.log &", AGENT_PORT, env_exports)
+                }
+            }
+            "typescript" | "ts" => format!("FORCE_HTTP_SERVER=1 AGENT_PORT={} nohup tsx /agent/agent.ts > /agent/stdout.log 2>/agent/stderr.log &", AGENT_PORT),
+            "javascript" | "js" => format!("FORCE_HTTP_SERVER=1 AGENT_PORT={} nohup node /agent/agent.js > /agent/stdout.log 2>/agent/stderr.log &", AGENT_PORT),
+            _ => format!("FORCE_HTTP_SERVER=1 AGENT_PORT={} nohup python3 -B /agent/agent.py > /agent/stdout.log 2>/agent/stderr.log &", AGENT_PORT),
+        };
+
+        container.exec(&["sh", "-c", &start_cmd]).await?;
+
+        // Wait for agent HTTP server to be ready
+        let mut agent_ready = false;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let health_result = container
+                .exec(&[
+                    "sh",
+                    "-c",
+                    &format!("curl -s http://127.0.0.1:{}/health", AGENT_PORT),
+                ])
+                .await;
+            if let Ok(result) = health_result {
+                if result.output().contains("ok") {
+                    agent_ready = true;
+                    break;
+                }
+            }
+        }
+
+        if !agent_ready {
+            // Check stderr for errors
+            let log_result = container.exec(&["cat", "/agent/stderr.log"]).await;
+            let stderr = log_result.map(|r| r.output()).unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "Agent HTTP server failed to start: {}",
+                stderr
+            ));
+        }
+
+        debug!("Agent HTTP server ready on port {}", AGENT_PORT);
 
         let mut steps: Vec<(Option<String>, String, i32)> = Vec::new();
         let mut last_command: Option<String> = None;
@@ -342,48 +397,17 @@ impl TaskEvaluator {
 
             debug!("Step {}: sending request to agent", step);
 
-            // Execute agent step inside container
-            // We run the agent script with the request as input
-            let agent_cmd = match language {
-                "python" | "py" => format!(
-                    "echo '{}' | python3 /agent/agent.py 2>&1",
-                    request_json.replace('\'', "'\\''")
-                ),
-                "typescript" | "ts" => format!(
-                    "echo '{}' | tsx /agent/agent.ts 2>&1",
-                    request_json.replace('\'', "'\\''")
-                ),
-                "javascript" | "js" => format!(
-                    "echo '{}' | node /agent/agent.js 2>&1",
-                    request_json.replace('\'', "'\\''")
-                ),
-                "rust" | "rs" => format!(
-                    "echo '{}' | /agent/target/release/agent 2>&1",
-                    request_json.replace('\'', "'\\''")
-                ),
-                _ => format!(
-                    "echo '{}' | python3 /agent/agent.py 2>&1",
-                    request_json.replace('\'', "'\\''")
-                ),
-            };
-
-            // Add environment variables using export (works with pipes)
-            let env_exports = env_vars
-                .iter()
-                .map(|(k, v)| format!("export {}='{}'", k, v.replace('\'', "'\\''")))
-                .collect::<Vec<_>>()
-                .join(" && ");
-
-            let full_cmd = if env_exports.is_empty() {
-                agent_cmd
-            } else {
-                format!("{} && {}", env_exports, agent_cmd)
-            };
+            // Send POST request to agent HTTP server
+            let curl_cmd = format!(
+                "curl -s -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:{}/step",
+                request_json.replace('\'', "'\\''"),
+                AGENT_PORT
+            );
 
             // Execute with timeout
             let step_timeout = Duration::from_secs(60);
             let exec_result =
-                tokio::time::timeout(step_timeout, container.exec(&["sh", "-c", &full_cmd])).await;
+                tokio::time::timeout(step_timeout, container.exec(&["sh", "-c", &curl_cmd])).await;
 
             let agent_output = match exec_result {
                 Ok(Ok(result)) => result.output(),

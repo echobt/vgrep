@@ -54,26 +54,6 @@ enum Commands {
     #[command(visible_alias = "w")]
     Wizard,
 
-    /// Test an agent locally with progress display
-    #[command(visible_alias = "t")]
-    Test {
-        /// Path to the agent Python file
-        #[arg(short, long)]
-        agent: std::path::PathBuf,
-
-        /// Number of tasks to run
-        #[arg(short = 'n', long, default_value = "5")]
-        tasks: usize,
-
-        /// Task difficulty: easy, medium, hard
-        #[arg(short, long, default_value = "medium")]
-        difficulty: String,
-
-        /// Timeout per task in seconds
-        #[arg(long, default_value = "300")]
-        timeout: u64,
-    },
-
     /// Submit an agent to the network
     #[command(visible_alias = "s")]
     Submit {
@@ -304,12 +284,6 @@ async fn main() {
 
     let result = match cli.command {
         Commands::Wizard => wizard::run_submit_wizard(&cli.rpc).await,
-        Commands::Test {
-            agent,
-            tasks,
-            difficulty,
-            timeout,
-        } => commands::test::run(agent, tasks, difficulty, timeout, true, cli.verbose).await,
         Commands::Submit {
             agent,
             key,

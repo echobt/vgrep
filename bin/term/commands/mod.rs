@@ -10,5 +10,4 @@ pub mod stats;
 pub mod status;
 pub mod submit;
 pub mod subnet;
-pub mod test;
 pub mod validate;
