@@ -2436,7 +2436,37 @@ async fn handle_p2p_message(
         }
     };
 
-    // Handle message via secure handler if available
+    // Handle Custom messages (proposals, votes) FIRST - these must always go to proposal_manager
+    // regardless of whether secure_handler is available
+    if let ChallengeP2PMessage::Custom(ref custom_msg) = req.message {
+        debug!(
+            "Received custom P2P message type '{}' from {}",
+            custom_msg.message_type,
+            custom_msg.sender.to_hex()
+        );
+
+        // Process via proposal manager asynchronously
+        let proposal_manager = state.proposal_manager.clone();
+        let p2p_broadcaster = state.p2p_broadcaster.clone();
+        let msg_clone = custom_msg.clone();
+
+        tokio::spawn(async move {
+            proposal_manager
+                .handle_p2p_message(&msg_clone, p2p_broadcaster.as_ref())
+                .await;
+        });
+
+        return (
+            StatusCode::OK,
+            Json(P2PMessageResponse {
+                success: true,
+                response: None,
+                error: None,
+            }),
+        );
+    }
+
+    // Handle other messages via secure handler if available
     let response = if let Some(ref secure_handler) = state.secure_handler {
         secure_handler
             .handle_p2p_message(from, req.message, state.p2p_broadcaster.as_ref())
