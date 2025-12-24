@@ -1460,7 +1460,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3207,7 +3207,7 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 [[package]]
 name = "platform-challenge-sdk"
 version = "0.1.0"
-source = "git+https://github.com/PlatformNetwork/platform.git?branch=main#b524581a779e69827a6e8dbe90d5e392cd30fec9"
+source = "git+https://github.com/PlatformNetwork/platform.git?branch=main#00ebeec7ba46b9b53b1490a624836d5f6cca4b13"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3235,7 +3235,7 @@ dependencies = [
 [[package]]
 name = "platform-core"
 version = "0.1.0"
-source = "git+https://github.com/PlatformNetwork/platform.git?branch=main#b524581a779e69827a6e8dbe90d5e392cd30fec9"
+source = "git+https://github.com/PlatformNetwork/platform.git?branch=main#00ebeec7ba46b9b53b1490a624836d5f6cca4b13"
 dependencies = [
  "anyhow",
  "bincode",
@@ -3460,7 +3460,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3772,7 +3772,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4733,7 +4733,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.3",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

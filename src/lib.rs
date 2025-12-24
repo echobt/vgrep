@@ -49,6 +49,7 @@ pub mod p2p_bridge;
 pub mod p2p_chain_storage;
 pub mod platform_auth;
 pub mod progress_aggregator;
+pub mod proposal_manager;
 pub mod python_whitelist;
 pub mod reward_decay;
 pub mod rpc;

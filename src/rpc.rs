@@ -2332,6 +2332,18 @@ async fn handle_basic_p2p_message(
             state.progress_aggregator.handle_progress_response(response);
             None
         }
+        ChallengeP2PMessage::Custom(custom_msg) => {
+            // Handle custom messages via proposal manager
+            // This is used for agent proposals, votes, LLM reviews, etc.
+            debug!(
+                "Received custom P2P message type '{}' from {}",
+                custom_msg.message_type,
+                custom_msg.sender.to_hex()
+            );
+            // Custom messages are handled asynchronously via proposal manager
+            // The proposal manager is integrated elsewhere in the submission flow
+            None
+        }
     }
 }
 

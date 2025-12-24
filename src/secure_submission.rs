@@ -688,6 +688,10 @@ impl SecureSubmissionHandler {
                 // Handled by the basic P2P handler in rpc.rs
                 None
             }
+            ChallengeP2PMessage::Custom(_) => {
+                // Handled by proposal manager in rpc.rs
+                None
+            }
         }
     }
 
