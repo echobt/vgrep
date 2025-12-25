@@ -35,76 +35,14 @@ use tracing::{debug, error, info, warn};
 // ============================================================================
 // TYPES FOR CHALLENGE CONTAINER <-> PLATFORM COMMUNICATION
 // ============================================================================
-
-/// Request sent by platform-server to challenge container to evaluate an agent
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EvaluateRequest {
-    /// Unique submission ID
-    pub submission_id: String,
-    /// Hash of the agent (miner_hotkey + source)
-    pub agent_hash: String,
-    /// Miner's hotkey (for logging only, not for auth)
-    pub miner_hotkey: String,
-    /// Agent name
-    pub name: Option<String>,
-    /// Source code to evaluate
-    pub source_code: String,
-    /// Decrypted API key for LLM calls (platform decrypted it)
-    pub api_key: Option<String>,
-    /// API provider (openai, anthropic, etc.)
-    pub api_provider: Option<String>,
-    /// Current epoch
-    pub epoch: u64,
-    /// Challenge configuration
-    pub config: ChallengeConfig,
-}
-
-/// Response from challenge container after evaluation
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EvaluateResponse {
-    /// Whether evaluation succeeded
-    pub success: bool,
-    /// Error message if failed
-    pub error: Option<String>,
-    /// Evaluation score (0.0 - 1.0)
-    pub score: f64,
-    /// Number of tasks passed
-    pub tasks_passed: u32,
-    /// Total number of tasks
-    pub tasks_total: u32,
-    /// Number of tasks failed
-    pub tasks_failed: u32,
-    /// Total cost in USD
-    pub total_cost_usd: f64,
-    /// Execution time in milliseconds
-    pub execution_time_ms: i64,
-    /// Per-task results
-    pub task_results: Option<Vec<TaskResult>>,
-    /// Execution log (truncated if too long)
-    pub execution_log: Option<String>,
-}
-
-/// Individual task result
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskResult {
-    pub task_id: String,
-    pub passed: bool,
-    pub score: f64,
-    pub execution_time_ms: i64,
-    pub cost_usd: f64,
-    pub error: Option<String>,
-}
-
-/// Challenge configuration sent by platform-server
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChallengeConfig {
-    pub challenge_id: String,
-    pub max_tasks: u32,
-    pub timeout_seconds: u32,
-    pub max_cost_usd: f64,
-    pub module_whitelist: Vec<String>,
-    pub model_whitelist: Vec<String>,
-}
+//
+// NOTE: The authoritative EvaluateRequest/Response definitions are in server.rs
+// This file only contains types used by PlatformClient for querying platform-server.
+//
+// See server.rs for:
+// - EvaluateRequest (POST /evaluate input)
+// - EvaluateResponse (POST /evaluate output)
+// - TaskResultResponse (per-task results)
 
 /// Network state info (read-only for challenge)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -361,48 +299,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_evaluate_request_serialization() {
-        let req = EvaluateRequest {
-            submission_id: "sub-123".to_string(),
-            agent_hash: "abc123".to_string(),
-            miner_hotkey: "5GrwvaEF...".to_string(),
-            name: Some("test-agent".to_string()),
-            source_code: "print('hello')".to_string(),
-            api_key: Some("sk-test".to_string()),
-            api_provider: Some("openai".to_string()),
+    fn test_snapshot_response_serialization() {
+        let resp = SnapshotResponse {
             epoch: 100,
-            config: ChallengeConfig {
-                challenge_id: "term-bench".to_string(),
-                max_tasks: 10,
-                timeout_seconds: 300,
-                max_cost_usd: 1.0,
-                module_whitelist: vec!["os".to_string()],
-                model_whitelist: vec!["gpt-4".to_string()],
-            },
-        };
-
-        let json = serde_json::to_string(&req).unwrap();
-        let parsed: EvaluateRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.submission_id, "sub-123");
-    }
-
-    #[test]
-    fn test_evaluate_response_serialization() {
-        let resp = EvaluateResponse {
-            success: true,
-            error: None,
-            score: 0.85,
-            tasks_passed: 8,
-            tasks_total: 10,
-            tasks_failed: 2,
-            total_cost_usd: 0.15,
-            execution_time_ms: 5000,
-            task_results: None,
-            execution_log: Some("Log...".to_string()),
+            snapshot_time: 1234567890,
+            leaderboard: vec![],
+            validators: vec![],
+            total_stake: 1000000,
         };
 
         let json = serde_json::to_string(&resp).unwrap();
-        let parsed: EvaluateResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.score, 0.85);
+        let parsed: SnapshotResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.epoch, 100);
+    }
+
+    #[test]
+    fn test_network_state_serialization() {
+        let state = NetworkState {
+            current_epoch: 50,
+            current_block: 12345,
+            active_validators: 10,
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+        let parsed: NetworkState = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.current_epoch, 50);
     }
 }

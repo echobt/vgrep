@@ -11,6 +11,9 @@
 //!
 //! SECURITY: All agent code runs INSIDE non-privileged Docker containers.
 //! Agent code NEVER executes on the host machine.
+//!
+//! BROKER SUPPORT: When CONTAINER_BROKER_WS_URL is set, uses WebSocket broker
+//! instead of direct Docker access for enhanced security.
 
 use anyhow::{bail, Context, Result};
 use base64::Engine;
@@ -27,7 +30,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
+
+use crate::container_backend::{self, ContainerBackend, ContainerHandle};
 
 use super::runner::Agent;
 use super::session::{AgentResponse, TmuxSession};
