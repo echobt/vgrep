@@ -2,13 +2,13 @@
 
 use crate::print_banner;
 use crate::style::*;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
-pub async fn run(rpc_url: &str, limit: usize) -> Result<()> {
+pub async fn run(platform_url: &str, limit: usize) -> Result<()> {
     print_banner();
     print_header("Leaderboard");
 
-    let entries = fetch_leaderboard(rpc_url, limit).await?;
+    let entries = fetch_leaderboard(platform_url, limit).await?;
 
     if entries.is_empty() {
         println!("  {} No agents on the leaderboard yet.", style_dim("─"));
@@ -24,20 +24,19 @@ pub async fn run(rpc_url: &str, limit: usize) -> Result<()> {
 
     // Table header
     println!(
-        "  {:<4} {:<10} {:<18} {:<10} {:<12} {}",
+        "  {:<4} {:<10} {:<18} {:<8} {:<12} {}",
         style_bold("Rank"),
         style_bold("Score"),
         style_bold("Agent"),
-        style_bold("Tasks"),
-        style_bold("Submitted"),
+        style_bold("Evals"),
+        style_bold("Updated"),
         style_bold("Miner")
     );
     println!("  {}", style_dim(&"─".repeat(75)));
 
     // Table rows
-    for (i, entry) in entries.iter().enumerate() {
-        let rank = i + 1;
-        let rank_icon = match rank {
+    for entry in &entries {
+        let rank_icon = match entry.rank {
             1 => "🥇",
             2 => "🥈",
             3 => "🥉",
@@ -52,19 +51,29 @@ pub async fn run(rpc_url: &str, limit: usize) -> Result<()> {
             colors::RED
         };
 
-        let tasks_str = format!("{}/{}", entry.tasks_passed, entry.tasks_total);
+        let updated = if entry.updated_at.len() >= 10 {
+            &entry.updated_at[..10]
+        } else {
+            &entry.updated_at
+        };
+
+        let miner_short = if entry.miner.len() > 8 {
+            format!("{}...", &entry.miner[..8])
+        } else {
+            entry.miner.clone()
+        };
 
         println!(
-            "  {}{:<2} {}{:>6.2}%{}  {:<18} {:<10} {:<12} {}",
+            "  {}{:<2} {}{:>6.2}%{}  {:<18} {:<8} {:<12} {}",
             rank_icon,
-            rank,
+            entry.rank,
             score_color,
             entry.score * 100.0,
             colors::RESET,
             truncate(&entry.name, 16),
-            tasks_str,
-            &entry.submitted[..10],
-            style_gray(&format!("{}...", &entry.miner[..8]))
+            entry.evaluation_count,
+            updated,
+            style_gray(&miner_short)
         );
     }
 
@@ -91,35 +100,55 @@ pub async fn run(rpc_url: &str, limit: usize) -> Result<()> {
 }
 
 struct LeaderboardEntry {
+    rank: u32,
     name: String,
     score: f64,
-    tasks_passed: u32,
-    tasks_total: u32,
-    submitted: String,
+    evaluation_count: u32,
+    updated_at: String,
     miner: String,
 }
 
 async fn fetch_leaderboard(platform_url: &str, limit: usize) -> Result<Vec<LeaderboardEntry>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
     let url = format!("{}/api/v1/leaderboard?limit={}", platform_url, limit);
 
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let data: Vec<serde_json::Value> = resp.json().await?;
-            Ok(data
-                .iter()
-                .map(|v| LeaderboardEntry {
-                    name: v["name"].as_str().unwrap_or("unnamed").to_string(),
-                    score: v["score"].as_f64().unwrap_or(0.0),
-                    tasks_passed: v["tasks_passed"].as_u64().unwrap_or(0) as u32,
-                    tasks_total: v["tasks_total"].as_u64().unwrap_or(10) as u32,
-                    submitted: v["submitted_at"].as_str().unwrap_or("").to_string(),
-                    miner: v["miner_hotkey"].as_str().unwrap_or("").to_string(),
-                })
-                .collect())
-        }
-        _ => Ok(Vec::new()),
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| anyhow!("Failed to connect to platform: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(anyhow!(
+            "Failed to fetch leaderboard: HTTP {} from {}",
+            resp.status(),
+            url
+        ));
     }
+
+    let data: Vec<serde_json::Value> = resp
+        .json()
+        .await
+        .map_err(|e| anyhow!("Invalid response: {}", e))?;
+
+    Ok(data
+        .iter()
+        .map(|v| LeaderboardEntry {
+            rank: v["rank"].as_u64().unwrap_or(0) as u32,
+            name: v["name"].as_str().unwrap_or("unnamed").to_string(),
+            score: v["consensus_score"].as_f64().unwrap_or(0.0),
+            evaluation_count: v["evaluation_count"].as_u64().unwrap_or(0) as u32,
+            updated_at: v["updated_at"]
+                .as_str()
+                .or_else(|| v["updated_at"].as_i64().map(|_| ""))
+                .unwrap_or("")
+                .to_string(),
+            miner: v["miner_hotkey"].as_str().unwrap_or("").to_string(),
+        })
+        .collect())
 }
 
 fn truncate(s: &str, max: usize) -> String {
