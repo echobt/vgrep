@@ -4,13 +4,15 @@ use crate::print_banner;
 use crate::style::*;
 use anyhow::{anyhow, Result};
 
+const CHALLENGE_ID: &str = "term-challenge";
+
 pub async fn run(platform_url: &str, limit: usize) -> Result<()> {
     print_banner();
     print_header("Leaderboard");
 
-    let entries = fetch_leaderboard(platform_url, limit).await?;
+    let response = fetch_leaderboard(platform_url, limit).await?;
 
-    if entries.is_empty() {
+    if response.entries.is_empty() {
         println!("  {} No agents on the leaderboard yet.", style_dim("─"));
         println!();
         print_info("Be the first to submit an agent!");
@@ -22,20 +24,26 @@ pub async fn run(platform_url: &str, limit: usize) -> Result<()> {
         return Ok(());
     }
 
+    println!(
+        "  {} Challenge: {}",
+        style_dim("│"),
+        style_cyan(&response.challenge_id)
+    );
+    println!();
+
     // Table header
     println!(
-        "  {:<4} {:<10} {:<18} {:<8} {:<12} {}",
+        "  {:<4} {:<10} {:<20} {:<8} {}",
         style_bold("Rank"),
         style_bold("Score"),
         style_bold("Agent"),
         style_bold("Evals"),
-        style_bold("Updated"),
         style_bold("Miner")
     );
-    println!("  {}", style_dim(&"─".repeat(75)));
+    println!("  {}", style_dim(&"─".repeat(65)));
 
     // Table rows
-    for entry in &entries {
+    for entry in &response.entries {
         let rank_icon = match entry.rank {
             1 => "🥇",
             2 => "🥈",
@@ -51,28 +59,22 @@ pub async fn run(platform_url: &str, limit: usize) -> Result<()> {
             colors::RED
         };
 
-        let updated = if entry.updated_at.len() >= 10 {
-            &entry.updated_at[..10]
-        } else {
-            &entry.updated_at
-        };
-
-        let miner_short = if entry.miner.len() > 8 {
-            format!("{}...", &entry.miner[..8])
+        let name = entry.name.as_deref().unwrap_or("unnamed");
+        let miner_short = if entry.miner.len() > 12 {
+            format!("{}...", &entry.miner[..12])
         } else {
             entry.miner.clone()
         };
 
         println!(
-            "  {}{:<2} {}{:>6.2}%{}  {:<18} {:<8} {:<12} {}",
+            "  {}{:<2} {}{:>6.2}%{}  {:<20} {:<8} {}",
             rank_icon,
             entry.rank,
             score_color,
             entry.score * 100.0,
             colors::RESET,
-            truncate(&entry.name, 16),
+            truncate(name, 18),
             entry.evaluation_count,
-            updated,
             style_gray(&miner_short)
         );
     }
@@ -80,14 +82,14 @@ pub async fn run(platform_url: &str, limit: usize) -> Result<()> {
     println!();
 
     // Summary
-    let total = entries.len();
-    let avg_score: f64 = entries.iter().map(|e| e.score).sum::<f64>() / total as f64;
+    let total = response.entries.len();
+    let avg_score: f64 = response.entries.iter().map(|e| e.score).sum::<f64>() / total as f64;
 
     print_section("Summary");
     print_key_value("Total Agents", &total.to_string());
     print_key_value("Average Score", &format!("{:.2}%", avg_score * 100.0));
 
-    if let Some(best) = entries.first() {
+    if let Some(best) = response.entries.first() {
         print_key_value_colored(
             "Best Score",
             &format!("{:.2}%", best.score * 100.0),
@@ -99,21 +101,29 @@ pub async fn run(platform_url: &str, limit: usize) -> Result<()> {
     Ok(())
 }
 
+struct LeaderboardResponse {
+    challenge_id: String,
+    entries: Vec<LeaderboardEntry>,
+}
+
 struct LeaderboardEntry {
     rank: u32,
-    name: String,
+    name: Option<String>,
     score: f64,
     evaluation_count: u32,
-    updated_at: String,
     miner: String,
 }
 
-async fn fetch_leaderboard(platform_url: &str, limit: usize) -> Result<Vec<LeaderboardEntry>> {
+async fn fetch_leaderboard(platform_url: &str, limit: usize) -> Result<LeaderboardResponse> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
 
-    let url = format!("{}/api/v1/leaderboard?limit={}", platform_url, limit);
+    // Use challenge-specific endpoint
+    let url = format!(
+        "{}/api/v1/challenges/{}/leaderboard?limit={}",
+        platform_url, CHALLENGE_ID, limit
+    );
 
     let resp = client
         .get(&url)
@@ -129,26 +139,35 @@ async fn fetch_leaderboard(platform_url: &str, limit: usize) -> Result<Vec<Leade
         ));
     }
 
-    let data: Vec<serde_json::Value> = resp
+    let data: serde_json::Value = resp
         .json()
         .await
         .map_err(|e| anyhow!("Invalid response: {}", e))?;
 
-    Ok(data
-        .iter()
-        .map(|v| LeaderboardEntry {
-            rank: v["rank"].as_u64().unwrap_or(0) as u32,
-            name: v["name"].as_str().unwrap_or("unnamed").to_string(),
-            score: v["consensus_score"].as_f64().unwrap_or(0.0),
-            evaluation_count: v["evaluation_count"].as_u64().unwrap_or(0) as u32,
-            updated_at: v["updated_at"]
-                .as_str()
-                .or_else(|| v["updated_at"].as_i64().map(|_| ""))
-                .unwrap_or("")
-                .to_string(),
-            miner: v["miner_hotkey"].as_str().unwrap_or("").to_string(),
+    let challenge_id = data["challenge_id"]
+        .as_str()
+        .unwrap_or(CHALLENGE_ID)
+        .to_string();
+
+    let entries = data["entries"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|v| LeaderboardEntry {
+                    rank: v["rank"].as_u64().unwrap_or(0) as u32,
+                    name: v["name"].as_str().map(String::from),
+                    score: v["consensus_score"].as_f64().unwrap_or(0.0),
+                    evaluation_count: v["evaluation_count"].as_u64().unwrap_or(0) as u32,
+                    miner: v["miner_hotkey"].as_str().unwrap_or("").to_string(),
+                })
+                .collect()
         })
-        .collect())
+        .unwrap_or_default();
+
+    Ok(LeaderboardResponse {
+        challenge_id,
+        entries,
+    })
 }
 
 fn truncate(s: &str, max: usize) -> String {

@@ -620,6 +620,69 @@ pub async fn get_config(State(state): State<Arc<ChallengeServerState>>) -> Json<
 }
 
 // ============================================================================
+// /leaderboard ENDPOINT
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct LeaderboardQuery {
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LeaderboardResponse {
+    pub challenge_id: String,
+    pub entries: Vec<LeaderboardEntryResponse>,
+    pub total_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LeaderboardEntryResponse {
+    pub rank: u32,
+    pub agent_hash: String,
+    pub miner_hotkey: String,
+    pub name: Option<String>,
+    pub consensus_score: f64,
+    pub evaluation_count: u32,
+}
+
+pub async fn get_leaderboard(
+    State(state): State<Arc<ChallengeServerState>>,
+    Query(query): Query<LeaderboardQuery>,
+) -> Result<Json<LeaderboardResponse>, (StatusCode, String)> {
+    let limit = query.limit.unwrap_or(100);
+
+    // Fetch leaderboard from platform-server via snapshot
+    let snapshot = state
+        .platform_client
+        .get_snapshot(None)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let entries: Vec<LeaderboardEntryResponse> = snapshot
+        .leaderboard
+        .iter()
+        .take(limit)
+        .enumerate()
+        .map(|(i, e)| LeaderboardEntryResponse {
+            rank: (i + 1) as u32,
+            agent_hash: e.agent_hash.clone(),
+            miner_hotkey: e.miner_hotkey.clone(),
+            name: e.name.clone(),
+            consensus_score: e.consensus_score,
+            evaluation_count: e.evaluation_count,
+        })
+        .collect();
+
+    let total_count = entries.len();
+
+    Ok(Json(LeaderboardResponse {
+        challenge_id: state.challenge_id.clone(),
+        entries,
+        total_count,
+    }))
+}
+
+// ============================================================================
 // /health ENDPOINT
 // ============================================================================
 
@@ -680,6 +743,7 @@ pub async fn run_server_with_mode(
         .route("/evaluate", post(evaluate_agent))
         .route("/validate", post(validate_source))
         .route("/config", get(get_config))
+        .route("/leaderboard", get(get_leaderboard))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -720,6 +784,7 @@ pub async fn run_server_with_mode(
     info!("║    POST /evaluate    - Run agent on real tasks               ║");
     info!("║    POST /validate    - Whitelist validation                  ║");
     info!("║    GET  /config      - Challenge configuration               ║");
+    info!("║    GET  /leaderboard - Challenge leaderboard                 ║");
     info!("╚══════════════════════════════════════════════════════════════╝");
 
     axum::serve(listener, app).await?;

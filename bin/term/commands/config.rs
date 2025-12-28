@@ -4,6 +4,8 @@ use crate::print_banner;
 use crate::style::*;
 use anyhow::{anyhow, Result};
 
+const CHALLENGE_ID: &str = "term-challenge";
+
 pub async fn run(platform_url: &str) -> Result<()> {
     print_banner();
     print_header("Challenge Configuration");
@@ -14,6 +16,7 @@ pub async fn run(platform_url: &str) -> Result<()> {
     print_key_value("Challenge ID", &config.challenge_id);
     print_key_value("Dataset", &config.dataset);
     print_key_value("Dataset Version", &config.dataset_version);
+    print_key_value("Test Mode", &config.test_mode.to_string());
     println!();
 
     print_section("Submission Requirements");
@@ -38,7 +41,6 @@ pub async fn run(platform_url: &str) -> Result<()> {
         "Max Total Cost",
         &format!("${:.2}", config.max_total_cost_usd),
     );
-    print_key_value("Test Mode", &config.test_mode.to_string());
     println!();
 
     print_section("Scoring");
@@ -57,13 +59,13 @@ struct ChallengeConfig {
     challenge_id: String,
     dataset: String,
     dataset_version: String,
+    test_mode: bool,
     min_stake_tao: u64,
     tasks_per_evaluation: u32,
     max_steps_per_task: u32,
     max_concurrent_tasks: u32,
     max_cost_per_task_usd: f64,
     max_total_cost_usd: f64,
-    test_mode: bool,
 }
 
 async fn fetch_config(platform_url: &str) -> Result<ChallengeConfig> {
@@ -71,7 +73,8 @@ async fn fetch_config(platform_url: &str) -> Result<ChallengeConfig> {
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
 
-    let url = format!("{}/api/v1/challenges/term-challenge/config", platform_url);
+    // Use challenge-specific endpoint
+    let url = format!("{}/api/v1/challenges/{}/config", platform_url, CHALLENGE_ID);
 
     let resp = client
         .get(&url)
@@ -95,7 +98,7 @@ async fn fetch_config(platform_url: &str) -> Result<ChallengeConfig> {
     Ok(ChallengeConfig {
         challenge_id: data["challenge_id"]
             .as_str()
-            .unwrap_or("unknown")
+            .unwrap_or(CHALLENGE_ID)
             .to_string(),
         dataset: data["dataset"]
             .as_str()
@@ -105,12 +108,12 @@ async fn fetch_config(platform_url: &str) -> Result<ChallengeConfig> {
             .as_str()
             .unwrap_or("unknown")
             .to_string(),
+        test_mode: data["test_mode"].as_bool().unwrap_or(false),
         min_stake_tao: data["min_stake_tao"].as_u64().unwrap_or(0),
         tasks_per_evaluation: data["tasks_per_evaluation"].as_u64().unwrap_or(0) as u32,
         max_steps_per_task: data["max_steps_per_task"].as_u64().unwrap_or(0) as u32,
         max_concurrent_tasks: data["max_concurrent_tasks"].as_u64().unwrap_or(0) as u32,
         max_cost_per_task_usd: data["max_cost_per_task_usd"].as_f64().unwrap_or(0.0),
         max_total_cost_usd: data["max_total_cost_usd"].as_f64().unwrap_or(0.0),
-        test_mode: data["test_mode"].as_bool().unwrap_or(false),
     })
 }
