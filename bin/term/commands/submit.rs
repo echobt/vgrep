@@ -6,10 +6,8 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sp_core::{sr25519, Pair};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
-use term_challenge::{ApiKeyConfig, ApiKeyConfigBuilder};
 
 use crate::style::colors::*;
 
@@ -19,11 +17,9 @@ struct SubmitRequest {
     source_code: String,
     miner_hotkey: String,
     signature: String,
-    stake: u64,
     name: Option<String>,
-    description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    api_keys: Option<ApiKeyConfig>,
+    api_key: Option<String>,
+    api_provider: Option<String>,
 }
 
 /// Response from submission
@@ -31,58 +27,18 @@ struct SubmitRequest {
 #[allow(dead_code)]
 struct SubmitResponse {
     success: bool,
+    submission_id: Option<String>,
     agent_hash: Option<String>,
-    status: Option<serde_json::Value>,
     error: Option<String>,
-    api_keys_info: Option<ApiKeysInfoResponse>,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct ApiKeysInfoResponse {
-    provided: bool,
-    mode: String,
-    validator_count: usize,
-}
-
-/// Response from can_submit check
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct CanSubmitResponse {
-    allowed: bool,
-    reason: Option<String>,
-    next_allowed_epoch: Option<u64>,
-    remaining_slots: f64,
-}
-
-/// Response from validators list
-#[derive(Debug, Deserialize)]
-struct ValidatorsResponse {
-    validators: Vec<ValidatorInfo>,
-    #[allow(dead_code)]
-    count: usize,
-    #[allow(dead_code)]
-    encryption_info: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct ValidatorInfo {
-    /// SS58 format hotkey (for display)
-    hotkey_ss58: String,
-    /// Hex format hotkey (for encryption)
-    hotkey_hex: String,
-    stake: u64,
 }
 
 pub async fn run(
-    rpc_url: &str,
+    platform_url: &str,
     agent: PathBuf,
     key: String,
     name: Option<String>,
     api_key: Option<String>,
-    per_validator: bool,
-    api_keys_file: Option<PathBuf>,
+    provider: String,
 ) -> Result<()> {
     print_banner();
     print_header("Submit Agent");
@@ -113,74 +69,47 @@ pub async fn run(
     println!();
     print_key_value("File", &filename);
     print_key_value("Size", &format!("{} bytes", source.len()));
-    print_key_value("RPC", rpc_url);
+    print_key_value("Platform", platform_url);
+    print_key_value("Provider", &provider);
     println!();
 
     // Step 1: Validate locally
-    print_step(1, 5, "Validating agent...");
+    print_step(1, 4, "Validating agent...");
     validate_source(&source)?;
     print_success("Validation passed");
 
     // Step 2: Parse key and derive hotkey
-    print_step(2, 5, "Parsing secret key...");
+    print_step(2, 4, "Parsing secret key...");
     let (signing_key, miner_hotkey) = parse_key_and_derive_hotkey(&key)?;
     print_success(&format!("Key parsed (hotkey: {}...)", &miner_hotkey[..16]));
 
-    // Step 3: Check if can submit and get validators
-    print_step(3, 6, "Checking submission eligibility...");
-    let (stake, validators) = check_can_submit_and_get_validators(rpc_url, &miner_hotkey).await?;
-    print_success(&format!(
-        "Eligible to submit (stake: {} RAO, {} validators)",
-        stake,
-        validators.len()
-    ));
-
-    // Step 4: Encrypt API keys (if provided)
-    print_step(4, 6, "Preparing API keys...");
-    let api_keys_config = prepare_api_keys(
-        api_key.as_deref(),
-        per_validator,
-        api_keys_file.as_ref(),
-        &validators,
-    )
-    .await?;
-
-    if api_keys_config.is_some() {
-        let mode = if per_validator {
-            "per-validator"
-        } else {
-            "shared"
-        };
-        print_success(&format!(
-            "API keys encrypted ({} mode, {} validators)",
-            mode,
-            validators.len()
+    // Step 3: Check API key
+    print_step(3, 4, "Checking API key...");
+    if api_key.is_none() {
+        return Err(anyhow!(
+            "API key required for LLM verification.\n\
+             Provide --api-key <YOUR_API_KEY>\n\
+             \n\
+             Get an API key from:\n\
+               - OpenRouter: https://openrouter.ai/keys (recommended)\n\
+               - Chutes: https://chutes.ai"
         ));
-    } else {
-        print_success("No API keys provided (agent will use default)");
     }
+    print_success("API key provided");
 
-    // Step 5: Sign and submit
-    print_step(5, 6, "Signing and submitting to validators...");
-    let submission_hash = submit_agent(
-        rpc_url,
+    // Step 4: Sign and submit
+    print_step(4, 4, "Signing and submitting...");
+    let (submission_id, agent_hash) = submit_agent(
+        platform_url,
         &source,
         &miner_hotkey,
         &signing_key,
-        stake,
         name,
-        api_keys_config,
+        api_key,
+        &provider,
     )
     .await?;
-    print_success("Submission broadcast complete");
-
-    // Step 6: Poll for status
-    print_step(6, 6, "Waiting for validator acknowledgments...");
-
-    let final_status = poll_submission_status(rpc_url, &submission_hash).await?;
-
-    println!();
-    print_success(&format!("Status: {:?}", final_status));
+    print_success("Submission complete");
 
     println!();
 
@@ -190,17 +119,18 @@ pub async fn run(
         &[
             "",
             &format!("  Agent: {}", agent_name),
-            &format!("  Hash:  {}", &submission_hash),
+            &format!("  Hash:  {}", &agent_hash),
+            &format!("  ID:    {}", &submission_id),
             "",
-            "  Your agent is now being processed by validators.",
+            "  Your agent is now being evaluated.",
             "  Check status with:",
             &format!(
                 "    {} status -H {}",
                 style_cyan("term"),
-                if submission_hash.len() >= 16 {
-                    &submission_hash[..16]
+                if agent_hash.len() >= 16 {
+                    &agent_hash[..16]
                 } else {
-                    &submission_hash
+                    &agent_hash
                 }
             ),
             "",
@@ -256,167 +186,36 @@ fn parse_key_and_derive_hotkey(key: &str) -> Result<(sr25519::Pair, String)> {
     Ok((pair, hotkey))
 }
 
-async fn check_can_submit_and_get_validators(
-    rpc_url: &str,
-    miner_hotkey: &str,
-) -> Result<(u64, Vec<String>)> {
-    let client = reqwest::Client::new();
-
-    // Default stake for testing (in production, this would be fetched from chain)
-    let default_stake: u64 = 10_000_000_000_000; // 10,000 TAO in RAO
-
-    // Check if can submit
-    let url = format!(
-        "{}/can_submit?miner_hotkey={}&stake={}",
-        rpc_url, miner_hotkey, default_stake
-    );
-
-    let response = client
-        .get(&url)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await;
-
-    match response {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                let can_submit: CanSubmitResponse = resp
-                    .json()
-                    .await
-                    .map_err(|e| anyhow!("Failed to parse response: {}", e))?;
-
-                if !can_submit.allowed {
-                    return Err(anyhow!(
-                        "Cannot submit: {}",
-                        can_submit
-                            .reason
-                            .unwrap_or_else(|| "Rate limited".to_string())
-                    ));
-                }
-            }
-        }
-        Err(_) => {
-            // RPC not available - continue for testing
-        }
-    }
-
-    // Get validators list
-    let validators = get_validators(rpc_url).await?;
-
-    Ok((default_stake, validators))
-}
-
-async fn get_validators(rpc_url: &str) -> Result<Vec<String>> {
-    let client = reqwest::Client::new();
-    let url = format!("{}/validators", rpc_url);
-
-    let response = client
-        .get(&url)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await;
-
-    match response {
-        Ok(resp) if resp.status().is_success() => {
-            let validators_resp: ValidatorsResponse = resp
-                .json()
-                .await
-                .map_err(|e| anyhow!("Failed to parse validators: {}", e))?;
-
-            // Return hotkey_hex for encryption
-            Ok(validators_resp
-                .validators
-                .into_iter()
-                .map(|v| v.hotkey_hex)
-                .collect())
-        }
-        Ok(resp) => {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            Err(anyhow!("Failed to get validators: {} - {}", status, body))
-        }
-        Err(e) => Err(anyhow!("Failed to connect to RPC: {}", e)),
-    }
-}
-
-async fn prepare_api_keys(
-    api_key: Option<&str>,
-    per_validator: bool,
-    api_keys_file: Option<&PathBuf>,
-    validator_hotkeys: &[String],
-) -> Result<Option<ApiKeyConfig>> {
-    // If per-validator mode with file
-    if per_validator {
-        if let Some(file_path) = api_keys_file {
-            let content = std::fs::read_to_string(file_path)
-                .map_err(|e| anyhow!("Failed to read API keys file: {}", e))?;
-
-            let keys: HashMap<String, String> = serde_json::from_str(&content)
-                .map_err(|e| anyhow!("Failed to parse API keys JSON: {}", e))?;
-
-            // Verify all validators have keys
-            for hotkey in validator_hotkeys {
-                if !keys.contains_key(hotkey) {
-                    return Err(anyhow!("Missing API key for validator: {}", hotkey));
-                }
-            }
-
-            let config = ApiKeyConfigBuilder::per_validator(keys)
-                .build(validator_hotkeys)
-                .map_err(|e| anyhow!("Failed to encrypt API keys: {}", e))?;
-
-            return Ok(Some(config));
-        } else {
-            return Err(anyhow!("--per-validator requires --api-keys-file"));
-        }
-    }
-
-    // Shared API key is REQUIRED for LLM verification
-    match api_key {
-        Some(key) => {
-            let config = ApiKeyConfigBuilder::shared(key)
-                .build(validator_hotkeys)
-                .map_err(|e| anyhow!("Failed to encrypt API key: {}", e))?;
-            Ok(Some(config))
-        }
-        None => Err(anyhow!(
-            "API key required for LLM verification.\n\
-                Provide --api-key <OPENROUTER_OR_CHUTES_KEY> for shared mode,\n\
-                or --per-validator --api-keys-file <FILE> for per-validator mode.\n\
-                \n\
-                Get an API key from:\n\
-                  - OpenRouter: https://openrouter.ai/keys\n\
-                  - Chutes: https://chutes.ai"
-        )),
-    }
-}
-
 async fn submit_agent(
-    rpc_url: &str,
+    platform_url: &str,
     source: &str,
     miner_hotkey: &str,
     signing_key: &sr25519::Pair,
-    stake: u64,
     name: Option<String>,
-    api_keys: Option<ApiKeyConfig>,
-) -> Result<String> {
+    api_key: Option<String>,
+    provider: &str,
+) -> Result<(String, String)> {
     let client = reqwest::Client::new();
 
-    // Sign the source code with sr25519
+    // Sign the source code
     let signature = signing_key.sign(source.as_bytes());
-    let signature_hex = hex::encode(signature.0);
+    let signature_hex = format!("0x{}", hex::encode(signature.0));
+
+    // Compute agent hash
+    let mut hasher = Sha256::new();
+    hasher.update(source.as_bytes());
+    let agent_hash = hex::encode(&hasher.finalize()[..16]);
 
     let request = SubmitRequest {
         source_code: source.to_string(),
         miner_hotkey: miner_hotkey.to_string(),
         signature: signature_hex,
-        stake,
         name,
-        description: None,
-        api_keys,
+        api_key,
+        api_provider: Some(provider.to_string()),
     };
 
-    let url = format!("{}/challenge/term-challenge/submit", rpc_url);
+    let url = format!("{}/api/v1/submissions", platform_url);
 
     let response = client
         .post(&url)
@@ -434,9 +233,11 @@ async fn submit_agent(
                     .map_err(|e| anyhow!("Failed to parse response: {}", e))?;
 
                 if submit_resp.success {
-                    submit_resp
-                        .agent_hash
-                        .ok_or_else(|| anyhow!("No agent hash in response"))
+                    let submission_id = submit_resp
+                        .submission_id
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let hash = submit_resp.agent_hash.unwrap_or(agent_hash);
+                    Ok((submission_id, hash))
                 } else {
                     Err(anyhow!(
                         "Submission failed: {}",
@@ -458,73 +259,6 @@ async fn submit_agent(
                 ))
             }
         }
-        Err(e) => {
-            // If RPC not available, generate a local hash for testing
-            if e.is_connect() || e.is_timeout() {
-                eprintln!(
-                    "    {} RPC not available, generating local hash for testing",
-                    style_dim("Warning:")
-                );
-
-                let mut hasher = Sha256::new();
-                hasher.update(miner_hotkey.as_bytes());
-                hasher.update(source.as_bytes());
-                hasher.update(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                        .to_le_bytes(),
-                );
-
-                let hash = hex::encode(&hasher.finalize()[..16]);
-                Ok(hash)
-            } else {
-                Err(anyhow!("Request failed: {}", e))
-            }
-        }
+        Err(e) => Err(anyhow!("Request failed: {}", e)),
     }
-}
-
-async fn poll_submission_status(rpc_url: &str, agent_hash: &str) -> Result<String> {
-    let client = reqwest::Client::new();
-    let url = format!("{}/status/{}", rpc_url, agent_hash);
-
-    for i in 0..20 {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        print!(
-            "\r    {} Checking status... (attempt {}/20)",
-            spinner_frame(i as u64),
-            i + 1
-        );
-        std::io::Write::flush(&mut std::io::stdout())?;
-
-        let response = client
-            .get(&url)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await;
-
-        match response {
-            Ok(resp) if resp.status().is_success() => {
-                if let Ok(status) = resp.json::<serde_json::Value>().await {
-                    let state = status
-                        .get("status")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("unknown");
-
-                    // If distributed or active, we're done
-                    if state == "Distributed" || state == "Active" || state == "Verified" {
-                        println!();
-                        return Ok(state.to_string());
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    println!();
-    Ok("Pending".to_string())
 }

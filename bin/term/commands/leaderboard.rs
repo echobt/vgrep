@@ -99,12 +99,9 @@ struct LeaderboardEntry {
     miner: String,
 }
 
-async fn fetch_leaderboard(rpc_url: &str, limit: usize) -> Result<Vec<LeaderboardEntry>> {
+async fn fetch_leaderboard(platform_url: &str, limit: usize) -> Result<Vec<LeaderboardEntry>> {
     let client = reqwest::Client::new();
-    let url = format!(
-        "{}/challenge/term-challenge/leaderboard?limit={}",
-        rpc_url, limit
-    );
+    let url = format!("{}/api/v1/leaderboard?limit={}", platform_url, limit);
 
     match client.get(&url).send().await {
         Ok(resp) if resp.status().is_success() => {

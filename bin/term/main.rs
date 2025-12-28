@@ -69,17 +69,13 @@ enum Commands {
         #[arg(long)]
         name: Option<String>,
 
-        /// LLM API key to encrypt for validators (OpenAI, Anthropic, etc.)
+        /// LLM API key (OpenRouter recommended)
         #[arg(long, env = "LLM_API_KEY")]
         api_key: Option<String>,
 
-        /// Use per-validator API keys (more secure, requires --api-keys-file)
-        #[arg(long)]
-        per_validator: bool,
-
-        /// JSON file with per-validator API keys: {"validator_hotkey": "api_key", ...}
-        #[arg(long)]
-        api_keys_file: Option<std::path::PathBuf>,
+        /// LLM provider: openrouter, chutes, openai, anthropic
+        #[arg(long, default_value = "openrouter")]
+        provider: String,
     },
 
     /// Check agent status and results
@@ -289,20 +285,8 @@ async fn main() {
             key,
             name,
             api_key,
-            per_validator,
-            api_keys_file,
-        } => {
-            commands::submit::run(
-                &cli.rpc,
-                agent,
-                key,
-                name,
-                api_key,
-                per_validator,
-                api_keys_file,
-            )
-            .await
-        }
+            provider,
+        } => commands::submit::run(&cli.rpc, agent, key, name, api_key, provider).await,
         Commands::Status { hash, watch } => commands::status::run(&cli.rpc, hash, watch).await,
         Commands::Leaderboard { limit } => commands::leaderboard::run(&cli.rpc, limit).await,
         Commands::Validate { agent } => commands::validate::run(agent).await,

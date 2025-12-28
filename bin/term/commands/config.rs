@@ -58,9 +58,9 @@ struct ChallengeConfig {
     current_epoch: u64,
 }
 
-async fn fetch_config(rpc_url: &str) -> Result<ChallengeConfig> {
+async fn fetch_config(platform_url: &str) -> Result<ChallengeConfig> {
     let client = reqwest::Client::new();
-    let url = format!("{}/challenge/term-challenge/config", rpc_url);
+    let url = format!("{}/api/v1/challenges/term-bench/config", platform_url);
 
     match client.get(&url).send().await {
         Ok(resp) if resp.status().is_success() => {
