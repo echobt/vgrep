@@ -54,6 +54,11 @@ schnorrkel = "0.11"
 # Local SQLite storage for validators (replaces distributed P2P storage)
 rusqlite = { version = "0.32", features = ["bundled"] }
 
+# PostgreSQL for server mode (central challenge storage)
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1"] }
+deadpool-postgres = "0.14"
+postgres-types = { version = "0.2", features = ["derive"] }
+
 # Encryption for API keys
 chacha20poly1305 = "0.10"
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }

@@ -22,6 +22,7 @@ use crate::bench::task::Task;
 use crate::central_client::PlatformClient;
 use crate::config::ChallengeConfig;
 use crate::llm_review::{LlmConfig, LlmProvider, LlmReviewManager};
+use crate::pg_storage::PgStorage;
 use crate::python_whitelist::{PythonWhitelist, WhitelistConfig};
 use axum::{
     extract::{Query, State},
@@ -68,11 +69,14 @@ pub struct ChallengeServerState {
     pub registry_client: RwLock<RegistryClient>,
     pub cached_tasks: RwLock<HashMap<String, Vec<PathBuf>>>,
     pub test_mode: bool,
+    /// PostgreSQL storage for server mode (subnet owner)
+    /// None = validator mode (uses platform API), Some = server mode (local PostgreSQL)
+    pub pg_storage: Option<PgStorage>,
 }
 
 impl ChallengeServerState {
     pub fn new(config: ChallengeConfig, platform_url: &str, challenge_id: &str) -> Self {
-        Self::with_mode(config, platform_url, challenge_id, false)
+        Self::with_options(config, platform_url, challenge_id, false, None)
     }
 
     pub fn with_mode(
@@ -80,6 +84,16 @@ impl ChallengeServerState {
         platform_url: &str,
         challenge_id: &str,
         test_mode: bool,
+    ) -> Self {
+        Self::with_options(config, platform_url, challenge_id, test_mode, None)
+    }
+
+    pub fn with_options(
+        config: ChallengeConfig,
+        platform_url: &str,
+        challenge_id: &str,
+        test_mode: bool,
+        pg_storage: Option<PgStorage>,
     ) -> Self {
         let whitelist_config = WhitelistConfig {
             allowed_stdlib: config.module_whitelist.allowed_stdlib.clone(),
@@ -97,7 +111,13 @@ impl ChallengeServerState {
             registry_client: RwLock::new(RegistryClient::with_url(REGISTRY_URL)),
             cached_tasks: RwLock::new(HashMap::new()),
             test_mode,
+            pg_storage,
         }
+    }
+
+    /// Check if running in server mode (with PostgreSQL storage)
+    pub fn is_server_mode(&self) -> bool {
+        self.pg_storage.is_some()
     }
 
     /// Create LLM review manager with miner's API key
@@ -563,6 +583,30 @@ pub async fn evaluate_agent(
         agent_hash_short, score, tasks_passed, tasks_total, total_cost_usd, execution_time_ms
     );
 
+    // Store evaluation in PostgreSQL if in server mode
+    if let Some(pg) = &state.pg_storage {
+        let eval_record = crate::pg_storage::EvaluationRecord {
+            id: Uuid::new_v4().to_string(),
+            submission_id: req.submission_id.clone(),
+            agent_hash: req.agent_hash.clone(),
+            miner_hotkey: req.miner_hotkey.clone(),
+            score,
+            tasks_passed: tasks_passed as i32,
+            tasks_total: tasks_total as i32,
+            tasks_failed: tasks_failed as i32,
+            total_cost_usd,
+            execution_time_ms: Some(execution_time_ms),
+            task_results: Some(serde_json::to_value(&task_results).unwrap_or_default()),
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        if let Err(e) = pg.store_evaluation(&eval_record).await {
+            error!("Failed to store evaluation in PostgreSQL: {}", e);
+        } else {
+            debug!("Stored evaluation {} in PostgreSQL", eval_record.id);
+        }
+    }
+
     Ok(Json(EvaluateResponse {
         success: true,
         error: None,
@@ -672,27 +716,47 @@ pub async fn get_leaderboard(
 ) -> Result<Json<LeaderboardResponse>, (StatusCode, String)> {
     let limit = query.limit.unwrap_or(100);
 
-    // Fetch leaderboard from platform-server via snapshot
-    let snapshot = state
-        .platform_client
-        .get_snapshot(None)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Use PostgreSQL if in server mode, otherwise fetch from platform-server API
+    let entries: Vec<LeaderboardEntryResponse> = if let Some(pg) = &state.pg_storage {
+        // Server mode: read from local PostgreSQL
+        let lb = pg
+            .get_leaderboard(limit as i64)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let entries: Vec<LeaderboardEntryResponse> = snapshot
-        .leaderboard
-        .iter()
-        .take(limit)
-        .enumerate()
-        .map(|(i, e)| LeaderboardEntryResponse {
-            rank: (i + 1) as u32,
-            agent_hash: e.agent_hash.clone(),
-            miner_hotkey: e.miner_hotkey.clone(),
-            name: e.name.clone(),
-            consensus_score: e.consensus_score,
-            evaluation_count: e.evaluation_count,
-        })
-        .collect();
+        lb.iter()
+            .map(|e| LeaderboardEntryResponse {
+                rank: e.rank.unwrap_or(0) as u32,
+                agent_hash: e.agent_hash.clone(),
+                miner_hotkey: e.miner_hotkey.clone(),
+                name: e.name.clone(),
+                consensus_score: e.best_score,
+                evaluation_count: e.evaluation_count as u32,
+            })
+            .collect()
+    } else {
+        // Validator mode: fetch from platform-server via snapshot
+        let snapshot = state
+            .platform_client
+            .get_snapshot(None)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        snapshot
+            .leaderboard
+            .iter()
+            .take(limit)
+            .enumerate()
+            .map(|(i, e)| LeaderboardEntryResponse {
+                rank: (i + 1) as u32,
+                agent_hash: e.agent_hash.clone(),
+                miner_hotkey: e.miner_hotkey.clone(),
+                name: e.name.clone(),
+                consensus_score: e.consensus_score,
+                evaluation_count: e.evaluation_count,
+            })
+            .collect()
+    };
 
     let total_count = entries.len();
 
@@ -733,11 +797,31 @@ pub async fn run_server_with_mode(
     port: u16,
     test_mode: bool,
 ) -> anyhow::Result<()> {
-    let state = Arc::new(ChallengeServerState::with_mode(
+    // Initialize PostgreSQL if DATABASE_URL is set (server mode)
+    let pg_storage = if let Ok(database_url) = std::env::var("DATABASE_URL") {
+        info!("DATABASE_URL found, initializing PostgreSQL storage (server mode)");
+        match PgStorage::new(&database_url).await {
+            Ok(pg) => {
+                info!("PostgreSQL storage initialized successfully");
+                Some(pg)
+            }
+            Err(e) => {
+                error!("Failed to initialize PostgreSQL: {}", e);
+                warn!("Continuing in validator mode (no persistent storage)");
+                None
+            }
+        }
+    } else {
+        debug!("No DATABASE_URL, running in validator mode");
+        None
+    };
+
+    let state = Arc::new(ChallengeServerState::with_options(
         config,
         platform_url,
         challenge_id,
         test_mode,
+        pg_storage,
     ));
 
     // Pre-download tasks at startup
@@ -767,7 +851,7 @@ pub async fn run_server_with_mode(
         .route("/leaderboard", get(get_leaderboard))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .with_state(state.clone());
 
     let addr = format!("{}:{}", host, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -795,8 +879,16 @@ pub async fn run_server_with_mode(
         )
     );
     info!(
-        "║  Mode: {:<53} ║",
+        "║  Dataset Mode: {:<45} ║",
         if test_mode { "TEST" } else { "PRODUCTION" }
+    );
+    info!(
+        "║  Storage Mode: {:<45} ║",
+        if state.is_server_mode() {
+            "SERVER (PostgreSQL)"
+        } else {
+            "VALIDATOR (API only)"
+        }
     );
     info!("╠══════════════════════════════════════════════════════════════╣");
     info!("║  Endpoints:                                                  ║");

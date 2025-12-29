@@ -70,8 +70,11 @@ pub mod compat;
 /// Client for connecting to platform-server
 pub mod central_client;
 
-/// Local SQLite storage for caching
+/// Local SQLite storage for caching (validator mode)
 pub mod local_storage;
+
+/// PostgreSQL storage for server mode (subnet owner)
+pub mod pg_storage;
 
 /// Always-on challenge server
 pub mod server;
