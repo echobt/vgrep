@@ -32,6 +32,7 @@ use axum::{
 };
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
+use sp_core::crypto::Ss58Codec;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -40,6 +41,11 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+/// Validate that a string is a valid SS58 hotkey address
+fn is_valid_ss58_hotkey(hotkey: &str) -> bool {
+    sp_core::crypto::AccountId32::from_ss58check(hotkey).is_ok()
+}
 
 // ============================================================================
 // CONSTANTS
@@ -291,6 +297,30 @@ pub async fn evaluate_agent(
     Json(req): Json<EvaluateRequest>,
 ) -> Result<Json<EvaluateResponse>, (StatusCode, String)> {
     let start = std::time::Instant::now();
+
+    // Validate miner_hotkey is a valid SS58 address
+    if !is_valid_ss58_hotkey(&req.miner_hotkey) {
+        warn!(
+            "Invalid miner_hotkey format: {} (expected SS58 address)",
+            &req.miner_hotkey[..32.min(req.miner_hotkey.len())]
+        );
+        return Ok(Json(EvaluateResponse {
+            success: false,
+            error: Some(format!(
+                "Invalid miner_hotkey: must be a valid SS58 address (e.g., '5GrwvaEF...'). Received: {}",
+                &req.miner_hotkey[..32.min(req.miner_hotkey.len())]
+            )),
+            score: 0.0,
+            tasks_passed: 0,
+            tasks_total: 0,
+            tasks_failed: 0,
+            total_cost_usd: 0.0,
+            execution_time_ms: start.elapsed().as_millis() as i64,
+            task_results: None,
+            execution_log: None,
+        }));
+    }
+
     let config = state.config.read().await;
 
     let agent_name = req.name.as_deref().unwrap_or("unnamed");
