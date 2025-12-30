@@ -119,9 +119,9 @@ async fn fetch_leaderboard(platform_url: &str, limit: usize) -> Result<Leaderboa
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
 
-    // Use challenge-specific endpoint
+    // Use bridge route to term-challenge
     let url = format!(
-        "{}/api/v1/challenges/{}/leaderboard?limit={}",
+        "{}/api/v1/bridge/{}/leaderboard?limit={}",
         platform_url, CHALLENGE_ID, limit
     );
 

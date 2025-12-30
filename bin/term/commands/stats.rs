@@ -123,22 +123,24 @@ async fn fetch_stats(platform_url: &str) -> Result<NetworkStats> {
         recent_submissions: Vec::new(),
     };
 
-    // Try to get recent submissions (optional)
-    let submissions_url = format!("{}/api/v1/submissions", platform_url);
-    if let Ok(resp) = client.get(&submissions_url).send().await {
+    // Try to get recent activity from leaderboard (via bridge)
+    let leaderboard_url = format!("{}/api/v1/bridge/term-challenge/leaderboard", platform_url);
+    if let Ok(resp) = client.get(&leaderboard_url).send().await {
         if resp.status().is_success() {
-            if let Ok(subs) = resp.json::<Vec<serde_json::Value>>().await {
-                stats.recent_submissions = subs
-                    .iter()
-                    .take(5)
-                    .filter_map(|s| {
-                        Some(RecentSubmission {
-                            hash: s["agent_hash"].as_str()?.to_string(),
-                            name: s["name"].as_str().unwrap_or("unnamed").to_string(),
-                            score: None, // Score comes from evaluations
+            if let Ok(data) = resp.json::<serde_json::Value>().await {
+                if let Some(entries) = data["entries"].as_array() {
+                    stats.recent_submissions = entries
+                        .iter()
+                        .take(5)
+                        .filter_map(|s| {
+                            Some(RecentSubmission {
+                                hash: s["agent_hash"].as_str()?.to_string(),
+                                name: s["name"].as_str().unwrap_or("unnamed").to_string(),
+                                score: s["best_score"].as_f64(),
+                            })
                         })
-                    })
-                    .collect();
+                        .collect();
+                }
             }
         }
     }
