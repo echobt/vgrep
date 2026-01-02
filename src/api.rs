@@ -75,6 +75,45 @@ fn select_validators_for_agent(
 }
 
 // ============================================================================
+// PLATFORM SERVER INTEGRATION
+// ============================================================================
+
+/// Fetch whitelisted validators from platform-server
+/// Returns validators with stake >= 10k TAO who connected in last 24h
+async fn fetch_whitelisted_validators(platform_url: &str) -> Vec<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+
+    let url = format!("{}/api/v1/validators/whitelist", platform_url);
+
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<Vec<String>>().await {
+            Ok(validators) => {
+                info!(
+                    "Fetched {} whitelisted validators from platform-server",
+                    validators.len()
+                );
+                validators
+            }
+            Err(e) => {
+                warn!("Failed to parse validators response: {}", e);
+                vec![]
+            }
+        },
+        Ok(resp) => {
+            warn!("Failed to fetch validators: HTTP {}", resp.status());
+            vec![]
+        }
+        Err(e) => {
+            warn!("Failed to connect to platform-server: {}", e);
+            vec![]
+        }
+    }
+}
+
+// ============================================================================
 // SHARED STATE
 // ============================================================================
 
@@ -311,8 +350,13 @@ pub async fn submit_agent(
         }
     }
 
+    // Fetch whitelisted validators from platform-server (stake >= 10k TAO, connected last 24h)
+    let all_validators = fetch_whitelisted_validators(&state.platform_url).await;
+    if all_validators.is_empty() {
+        warn!("No whitelisted validators available from platform-server");
+    }
+
     // Select 3 validators from whitelist (deterministic based on agent_hash for reproducibility)
-    let all_validators = state.auth.get_all_validators().await;
     let selected_validators = select_validators_for_agent(&agent_hash, &all_validators, 3);
     let validator_count = selected_validators.len() as i32;
 
