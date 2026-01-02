@@ -3,6 +3,7 @@
 //! A command-line interface for the Terminal Benchmark Challenge.
 //! Test, submit, and monitor AI agents competing on terminal tasks.
 
+pub mod client;
 mod commands;
 mod style;
 mod tui;
