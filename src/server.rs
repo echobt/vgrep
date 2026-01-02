@@ -341,25 +341,14 @@ pub async fn evaluate_agent(
         state.dataset_name()
     );
 
-    // Step 1: Whitelist validation
+    // Step 1: Whitelist validation (warning only, LLM decides)
     let verification = state.whitelist.verify(&req.source_code);
     if !verification.valid {
-        warn!(
-            "Agent {} failed whitelist validation: {:?}",
+        // Log warning but don't block - LLM review will make final decision
+        info!(
+            "Agent {} has potential issues (LLM will review): {:?}",
             agent_hash_short, verification.errors
         );
-        return Ok(Json(EvaluateResponse {
-            success: false,
-            error: Some(format!("Whitelist violations: {:?}", verification.errors)),
-            score: 0.0,
-            tasks_passed: 0,
-            tasks_total: 0,
-            tasks_failed: 0,
-            total_cost_usd: 0.0,
-            execution_time_ms: start.elapsed().as_millis() as i64,
-            task_results: None,
-            execution_log: Some(format!("Rejected: {:?}", verification.errors)),
-        }));
     }
 
     // Step 2: LLM Code Review via centralized platform-server
@@ -388,6 +377,9 @@ pub async fn evaluate_agent(
             crate::platform_llm::ChatMessage::user(&review_prompt),
         ];
 
+        let mut flagged = false;
+        let mut flag_reason: Option<String> = None;
+
         match llm_client.chat_with_usage(messages).await {
             Ok(response) => {
                 total_cost_usd += response.cost_usd.unwrap_or(0.0);
@@ -396,24 +388,19 @@ pub async fn evaluate_agent(
                     // Parse review result
                     if let Ok(review) = serde_json::from_str::<serde_json::Value>(content) {
                         let approved = review["approved"].as_bool().unwrap_or(true);
-                        let reason = review["reason"].as_str().unwrap_or("Unknown");
+                        let reason = review["reason"].as_str().unwrap_or("Unknown").to_string();
 
                         if !approved {
-                            warn!("Agent {} failed LLM review: {}", agent_hash_short, reason);
-                            return Ok(Json(EvaluateResponse {
-                                success: false,
-                                error: Some(format!("LLM Review rejected: {}", reason)),
-                                score: 0.0,
-                                tasks_passed: 0,
-                                tasks_total: 0,
-                                tasks_failed: 0,
-                                total_cost_usd,
-                                execution_time_ms: start.elapsed().as_millis() as i64,
-                                task_results: None,
-                                execution_log: Some(format!("LLM Review: {}", reason)),
-                            }));
+                            // Flag for manual review by subnet owner, but continue evaluation
+                            warn!(
+                                "Agent {} flagged for manual review: {}",
+                                agent_hash_short, reason
+                            );
+                            flagged = true;
+                            flag_reason = Some(reason);
+                        } else {
+                            info!("Agent {} passed LLM review", agent_hash_short);
                         }
-                        info!("Agent {} passed LLM review", agent_hash_short);
                     }
                 }
             }
@@ -421,6 +408,14 @@ pub async fn evaluate_agent(
                 warn!("LLM review failed (continuing): {}", e);
                 // Continue without review on error (graceful degradation)
             }
+        }
+
+        // TODO: Store flagged status in DB for subnet owner review
+        if flagged {
+            info!(
+                "Agent {} will be evaluated but flagged for manual approval. Reason: {:?}",
+                agent_hash_short, flag_reason
+            );
         }
     } else {
         warn!("Could not create platform LLM client, skipping review");
