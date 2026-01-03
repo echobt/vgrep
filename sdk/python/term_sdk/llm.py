@@ -253,10 +253,21 @@ class LLM:
         self._api_key = os.environ.get("LLM_API_KEY") or os.environ.get(config["env_key"], "")
         self._is_anthropic = config.get("is_anthropic", False)
         
+        # Platform bridge configuration (for term-challenge evaluation)
+        self._agent_hash = os.environ.get("TERM_AGENT_HASH", "")
+        self._validator_hotkey = os.environ.get("TERM_VALIDATOR_HOTKEY", "")
+        self._platform_url = os.environ.get("TERM_PLATFORM_URL", "")
+        self._use_platform_bridge = bool(self._platform_url and self._agent_hash)
+        
+        if self._use_platform_bridge:
+            _log(f"Using platform bridge: {self._platform_url}")
+            # Override API URL to use platform bridge
+            self._api_url = f"{self._platform_url}/api/v1/llm/chat"
+        
         # Set default model (user > provider default)
         self.default_model = default_model or DEFAULT_MODELS.get(provider)
         
-        if not self._api_key:
+        if not self._api_key and not self._use_platform_bridge:
             _log(f"Warning: LLM_API_KEY or {config['env_key']} not set")
         
         # Stats
@@ -387,22 +398,40 @@ class LLM:
         if self._is_anthropic:
             return self._chat_anthropic(messages, model, tools, temp, tokens, start)
         
-        payload: Dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "temperature": temp,
-            "max_tokens": tokens,
-            "stream": False,
-        }
-        
-        if tools:
-            payload["tools"] = [t.to_dict() for t in tools]
-            payload["tool_choice"] = "auto"
-        
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
+        # Build payload - different format for platform bridge vs direct API
+        if self._use_platform_bridge:
+            # Platform bridge format
+            payload: Dict[str, Any] = {
+                "agent_hash": self._agent_hash,
+                "validator_hotkey": self._validator_hotkey,
+                "messages": messages,
+                "model": model,
+                "max_tokens": tokens,
+                "temperature": temp,
+            }
+            headers = {
+                "Content-Type": "application/json",
+            }
+            if self._api_key:
+                headers["Authorization"] = f"Bearer {self._api_key}"
+        else:
+            # Standard OpenAI-compatible format
+            payload: Dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "temperature": temp,
+                "max_tokens": tokens,
+                "stream": False,
+            }
+            
+            if tools:
+                payload["tools"] = [t.to_dict() for t in tools]
+                payload["tool_choice"] = "auto"
+            
+            headers = {
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            }
         
         response = self._client.post(self._api_url, headers=headers, json=payload)
         
@@ -410,6 +439,10 @@ class LLM:
             self._handle_api_error(response, model)
         
         data = response.json()
+        
+        # Handle platform bridge response format
+        if self._use_platform_bridge:
+            return self._parse_platform_response(data, model, start)
         
         return self._parse_response(data, model, start)
     
@@ -696,6 +729,47 @@ class LLM:
             }
         )
     
+    def _parse_platform_response(self, data: Dict, model: str, start: float) -> LLMResponse:
+        """Parse platform bridge response format."""
+        # Platform bridge response format:
+        # {"success": true, "content": "...", "model": "...", "usage": {...}, "cost_usd": 0.001}
+        
+        if not data.get("success", False):
+            error = data.get("error", "Unknown platform error")
+            raise LLMError(
+                code="platform_error",
+                message=error,
+                details={"raw_response": data}
+            )
+        
+        text = data.get("content", "") or ""
+        response_model = data.get("model") or model
+        
+        usage = data.get("usage", {})
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+        
+        cost = data.get("cost_usd", 0.0)
+        latency_ms = int((time.time() - start) * 1000)
+        
+        self.total_tokens += total_tokens
+        self.total_cost += cost
+        self.request_count += 1
+        self._update_model_stats(response_model, total_tokens, cost)
+        
+        _log(f"[platform] {response_model}: {total_tokens} tokens, ${cost:.4f}, {latency_ms}ms")
+        
+        return LLMResponse(
+            text=text,
+            model=response_model,
+            tokens=total_tokens,
+            cost=cost,
+            latency_ms=latency_ms,
+            function_calls=[],  # Platform bridge doesn't support function calling yet
+            raw=data,
+        )
+
     def _parse_response(self, data: Dict, model: str, start: float) -> LLMResponse:
         choice = data.get("choices", [{}])[0]
         message = choice.get("message", {})

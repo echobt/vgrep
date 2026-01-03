@@ -443,6 +443,38 @@ impl DockerEnvironment {
     pub fn logs_dir(&self) -> &Path {
         &self.logs_dir
     }
+
+    /// Execute a command array in the container (convenience method)
+    pub async fn exec(&self, cmd: &[&str]) -> Result<ExecOutput> {
+        let full_cmd = cmd.join(" ");
+        self.exec_command(&full_cmd, None).await
+    }
+
+    /// Execute a shell command in the container (convenience method)
+    pub async fn exec_shell(&self, cmd: &str) -> Result<ExecOutput> {
+        self.exec_command(cmd, None).await
+    }
+
+    /// Execute a shell command with timeout
+    pub async fn exec_shell_timeout(&self, cmd: &str, timeout_sec: f64) -> Result<ExecOutput> {
+        self.exec_command(cmd, Some(timeout_sec)).await
+    }
+
+    /// Execute command with environment variables
+    pub async fn exec_with_env(
+        &self,
+        cmd: &str,
+        env_vars: &std::collections::HashMap<String, String>,
+    ) -> Result<ExecOutput> {
+        let env_str: String = env_vars
+            .iter()
+            .map(|(k, v)| format!("{}='{}'", k, v.replace("'", "'\\''")))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let full_cmd = format!("{} {}", env_str, cmd);
+        self.exec_command(&full_cmd, None).await
+    }
 }
 
 impl Drop for DockerEnvironment {

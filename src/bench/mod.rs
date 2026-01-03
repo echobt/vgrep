@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod environment;
 pub mod external_agent;
+pub mod in_container_agent;
 pub mod llm;
 pub mod registry;
 pub mod results;
@@ -18,6 +19,7 @@ pub mod verifier;
 pub use agent::{create_agent, LlmAgent};
 pub use environment::DockerEnvironment;
 pub use external_agent::{create_external_agent, ExternalAgent};
+pub use in_container_agent::{InContainerAgent, InContainerResult, InContainerRunner};
 pub use llm::{CostTracker, LlmClient, Message, Provider};
 pub use registry::{Dataset, RegistryClient, TaskSource};
 pub use results::{BenchmarkResults, ResultExporter, TaskResult};
