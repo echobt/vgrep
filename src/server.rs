@@ -1110,12 +1110,19 @@ pub async fn run_server_with_mode(
         .route("/health", get(health_check))
         .route("/health/detailed", get(health_check_detailed))
         .route("/get_weights", get(get_weights))
-        .route("/evaluate", post(evaluate_agent))
         .route("/validate", post(validate_source))
         .route("/config", get(get_config))
         .route("/leaderboard", get(get_leaderboard))
         // Local LLM proxy for validator mode (agent -> validator -> central)
-        .route("/llm/proxy", post(llm_local_proxy))
+        .route("/llm/proxy", post(llm_local_proxy));
+
+    // /evaluate only available in validator mode (no pg_storage)
+    // In server mode, evaluations are done by validators via /api/v1/validator/* endpoints
+    if state.pg_storage.is_none() {
+        app = app.route("/evaluate", post(evaluate_agent));
+    }
+
+    let mut app = app
         .layer(cors.clone())
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10MB limit
         .layer(TraceLayer::new_for_http())

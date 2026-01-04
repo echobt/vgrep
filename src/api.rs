@@ -78,24 +78,41 @@ fn select_validators_for_agent(
 // PLATFORM SERVER INTEGRATION
 // ============================================================================
 
-/// Fetch whitelisted validators from platform-server
-/// Returns validators with stake >= 10k TAO who connected in last 24h
-async fn fetch_whitelisted_validators(platform_url: &str) -> Vec<String> {
+/// Validator info from platform-server /validators endpoint
+#[derive(Debug, Deserialize)]
+struct ValidatorInfo {
+    hotkey: String,
+    #[allow(dead_code)]
+    stake: i64,
+    #[allow(dead_code)]
+    last_seen: i64,
+    is_active: bool,
+    #[allow(dead_code)]
+    created_at: i64,
+}
+
+/// Fetch all active validators from platform-server database
+async fn fetch_validators_from_platform(platform_url: &str) -> Vec<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap_or_default();
 
-    let url = format!("{}/api/v1/validators/whitelist", platform_url);
+    let url = format!("{}/api/v1/validators", platform_url);
 
     match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => match resp.json::<Vec<String>>().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<Vec<ValidatorInfo>>().await {
             Ok(validators) => {
+                let active: Vec<String> = validators
+                    .into_iter()
+                    .filter(|v| v.is_active)
+                    .map(|v| v.hotkey)
+                    .collect();
                 info!(
-                    "Fetched {} whitelisted validators from platform-server",
-                    validators.len()
+                    "Fetched {} active validators from platform-server",
+                    active.len()
                 );
-                validators
+                active
             }
             Err(e) => {
                 warn!("Failed to parse validators response: {}", e);
@@ -359,10 +376,10 @@ pub async fn submit_agent(
         }
     }
 
-    // Fetch whitelisted validators from platform-server (stake >= 10k TAO, connected last 24h)
-    let all_validators = fetch_whitelisted_validators(&state.platform_url).await;
+    // Fetch active validators from platform-server database
+    let all_validators = fetch_validators_from_platform(&state.platform_url).await;
     if all_validators.is_empty() {
-        warn!("No whitelisted validators available from platform-server");
+        warn!("No active validators available from platform-server");
     }
 
     // Select 3 validators from whitelist (deterministic based on agent_hash for reproducibility)
