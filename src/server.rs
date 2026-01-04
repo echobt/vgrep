@@ -803,7 +803,11 @@ pub async fn get_leaderboard(
 // LOCAL LLM PROXY (Validator Mode)
 // ============================================================================
 
-/// Load validator's sr25519 keypair from VALIDATOR_SECRET environment variable
+/// Load validator's sr25519 keypair from environment variable
+///
+/// Tries in order:
+/// 1. VALIDATOR_SECRET
+/// 2. VALIDATOR_SECRET_KEY (used by platform validator-node)
 ///
 /// Supports:
 /// - Hex-encoded 32-byte seed (with or without 0x prefix)
@@ -812,7 +816,10 @@ fn load_validator_keypair() -> anyhow::Result<sp_core::sr25519::Pair> {
     use sp_core::{sr25519, Pair};
 
     let secret = std::env::var("VALIDATOR_SECRET")
-        .map_err(|_| anyhow::anyhow!("VALIDATOR_SECRET environment variable not set"))?;
+        .or_else(|_| std::env::var("VALIDATOR_SECRET_KEY"))
+        .map_err(|_| {
+            anyhow::anyhow!("VALIDATOR_SECRET or VALIDATOR_SECRET_KEY environment variable not set")
+        })?;
 
     let secret = secret.trim();
     let hex_str = secret.strip_prefix("0x").unwrap_or(secret);
@@ -1166,45 +1173,51 @@ pub async fn run_server_with_mode(
     if state.pg_storage.is_none() {
         app = app.route("/evaluate", post(evaluate_agent));
 
-        // In validator mode, start the evaluation worker
-        info!("Starting validator evaluation worker...");
+        // In validator mode, try to start the evaluation worker
+        // Worker requires VALIDATOR_SECRET or VALIDATOR_SECRET_KEY to sign requests
+        match crate::server::load_validator_keypair() {
+            Ok(keypair) => {
+                info!("Starting validator evaluation worker...");
 
-        // Load keypair
-        let keypair = crate::server::load_validator_keypair().map_err(|e| {
-            error!("Failed to load validator keypair: {}", e);
-            e
-        })?;
+                let validator_hotkey = {
+                    use sp_core::crypto::Ss58Codec;
+                    use sp_core::Pair as _;
+                    keypair.public().to_ss58check()
+                };
 
-        let validator_hotkey = {
-            use sp_core::crypto::Ss58Codec;
-            use sp_core::Pair;
-            keypair.public().to_ss58check()
-        };
+                // Get platform URL and challenge ID from state/env
+                let worker_platform_url = std::env::var("PLATFORM_URL")
+                    .unwrap_or_else(|_| "https://chain.platform.network".to_string());
+                let worker_challenge_id = challenge_id.to_string();
 
-        // Get platform URL and challenge ID from state/env
-        let worker_platform_url = std::env::var("PLATFORM_URL")
-            .unwrap_or_else(|_| "https://chain.platform.network".to_string());
-        let worker_challenge_id = challenge_id.to_string();
+                // Spawn WebSocket client to receive events
+                let event_rx =
+                    crate::validator_ws_client::spawn(worker_platform_url.clone(), keypair.clone());
 
-        // Spawn WebSocket client to receive events
-        let event_rx =
-            crate::validator_ws_client::spawn(worker_platform_url.clone(), keypair.clone());
+                // Spawn worker
+                let worker = crate::validator_worker::ValidatorWorker::new(
+                    worker_platform_url,
+                    worker_challenge_id,
+                    keypair,
+                );
 
-        // Spawn worker
-        let worker = crate::validator_worker::ValidatorWorker::new(
-            worker_platform_url,
-            worker_challenge_id,
-            keypair,
-        );
+                tokio::spawn(async move {
+                    worker.run(event_rx).await;
+                });
 
-        tokio::spawn(async move {
-            worker.run(event_rx).await;
-        });
-
-        info!(
-            "Validator worker started (hotkey: {}...)",
-            &validator_hotkey[..16]
-        );
+                info!(
+                    "Validator worker started (hotkey: {}...)",
+                    &validator_hotkey[..16]
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "Validator worker NOT started: {}. Set VALIDATOR_SECRET or VALIDATOR_SECRET_KEY to enable.",
+                    e
+                );
+                // Continue without worker - server will still serve /evaluate endpoint
+            }
+        }
     }
 
     let mut app = app
