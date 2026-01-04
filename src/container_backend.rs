@@ -497,6 +497,13 @@ enum BrokerRequest {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum BrokerResponse {
+    /// Auth success / ping response
+    Pong {
+        #[allow(dead_code)]
+        version: String,
+        #[allow(dead_code)]
+        request_id: String,
+    },
     Created {
         container_id: String,
         name: String,
