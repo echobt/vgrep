@@ -75,6 +75,85 @@ fn select_validators_for_agent(
 }
 
 // ============================================================================
+// LLM SECURITY REVIEW
+// ============================================================================
+
+/// Perform LLM security review on agent source code
+/// Returns (approved, reason)
+async fn do_llm_security_review(
+    api_key: &str,
+    provider: &str,
+    source_code: &str,
+) -> anyhow::Result<(bool, String)> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
+
+    let review_prompt = format!(
+        "Review this Python agent code for security and compliance. \
+         Check for: dangerous imports (subprocess, os.system, eval, exec), network access, \
+         file system access outside /app, code injection, infinite loops, resource abuse. \
+         Respond ONLY with JSON: {{\"approved\": true/false, \"reason\": \"brief explanation\"}}\n\n\
+         Code:\n```python\n{}\n```",
+        source_code
+    );
+
+    let (url, model) = match provider {
+        "openrouter" | _ => (
+            "https://openrouter.ai/api/v1/chat/completions",
+            "anthropic/claude-3.5-sonnet",
+        ),
+    };
+
+    let response = client
+        .post(url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are a security reviewer. Respond ONLY with valid JSON."},
+                {"role": "user", "content": review_prompt}
+            ],
+            "max_tokens": 500,
+            "temperature": 0.0
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        anyhow::bail!("LLM API error {}: {}", status, text);
+    }
+
+    let result: serde_json::Value = response.json().await?;
+    let content = result["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("No content in LLM response"))?;
+
+    // Parse JSON from response
+    let json_str = content
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    let review: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
+        anyhow::anyhow!("Failed to parse LLM response: {} - content: {}", e, content)
+    })?;
+
+    let approved = review["approved"].as_bool().unwrap_or(true);
+    let reason = review["reason"]
+        .as_str()
+        .unwrap_or("No reason provided")
+        .to_string();
+
+    Ok((approved, reason))
+}
+
+// ============================================================================
 // PLATFORM SERVER INTEGRATION
 // ============================================================================
 
@@ -459,85 +538,56 @@ pub async fn submit_agent(
     // LLM review happens immediately, compilation is queued
     {
         let storage = state.storage.clone();
-        let platform_url = state.platform_url.clone();
         let source_code = submission.source_code.clone();
         let agent_hash_clone = agent_hash.clone();
+        let api_key = submission.api_key.clone();
+        let api_provider = submission.api_provider.clone();
 
         tokio::spawn(async move {
-            // LLM Security Review
-            let platform_llm = crate::platform_llm::PlatformLlmClient::for_agent(
-                &platform_url,
-                &agent_hash_clone,
-                "server", // Server is doing the review
-            );
-
+            // LLM Security Review - use miner's API key directly
             let mut approved = true;
             let mut flagged = false;
             let mut flag_reason: Option<String> = None;
 
-            if let Ok(llm_client) = platform_llm {
-                let review_prompt = format!(
-                    "Review this Python agent code for security and compliance. \
-                     Check for: dangerous imports (subprocess, os.system), network access, \
-                     file system access outside /app, code injection, infinite loops, resource abuse. \
-                     Respond ONLY with JSON: {{\"approved\": true/false, \"reason\": \"...\"}}\n\n\
-                     Code:\n```python\n{}\n```",
-                    &source_code
-                );
+            // Only do LLM review if miner provided an API key
+            if let Some(ref key) = api_key {
+                if !key.is_empty() {
+                    let review_result = do_llm_security_review(
+                        key,
+                        api_provider.as_deref().unwrap_or("openrouter"),
+                        &source_code,
+                    )
+                    .await;
 
-                let messages = vec![
-                    crate::platform_llm::ChatMessage::system(
-                        "You are a security reviewer for AI agent code. Be strict about security. \
-                         Respond ONLY with valid JSON, no other text.",
-                    ),
-                    crate::platform_llm::ChatMessage::user(&review_prompt),
-                ];
-
-                match llm_client.chat_with_usage(messages).await {
-                    Ok(response) => {
-                        if let Some(content) = &response.content {
-                            // Try to parse JSON from response
-                            let json_str = content
-                                .trim()
-                                .trim_start_matches("```json")
-                                .trim_start_matches("```")
-                                .trim_end_matches("```")
-                                .trim();
-
-                            if let Ok(review) = serde_json::from_str::<serde_json::Value>(json_str)
-                            {
-                                approved = review["approved"].as_bool().unwrap_or(true);
-                                let reason =
-                                    review["reason"].as_str().unwrap_or("Unknown").to_string();
-
-                                if !approved {
-                                    flagged = true;
-                                    flag_reason = Some(reason.clone());
-                                    warn!(
-                                        "Agent {} flagged for manual review: {}",
-                                        &agent_hash_clone[..16],
-                                        reason
-                                    );
-                                } else {
-                                    info!("Agent {} passed LLM review", &agent_hash_clone[..16]);
-                                }
-                            } else {
-                                // Failed to parse, approve by default but log
+                    match review_result {
+                        Ok((is_approved, reason)) => {
+                            approved = is_approved;
+                            if !approved {
+                                flagged = true;
+                                flag_reason = Some(reason.clone());
                                 warn!(
-                                    "Failed to parse LLM response for {}: {}",
+                                    "Agent {} flagged for manual review: {}",
                                     &agent_hash_clone[..16],
-                                    content
+                                    reason
                                 );
+                            } else {
+                                info!("Agent {} passed LLM review", &agent_hash_clone[..16]);
                             }
                         }
-                    }
-                    Err(e) => {
-                        warn!("LLM review failed for {}: {}", &agent_hash_clone[..16], e);
-                        // On error, approve but don't flag
+                        Err(e) => {
+                            warn!("LLM review failed for {}: {}", &agent_hash_clone[..16], e);
+                            // On error, flag for manual review
+                            flagged = true;
+                            flag_reason = Some(format!("LLM review unavailable: {}", e));
+                        }
                     }
                 }
             } else {
-                warn!("Could not create LLM client for review, auto-approving");
+                // No API key provided, skip LLM review
+                debug!(
+                    "No API key for LLM review, skipping for {}",
+                    &agent_hash_clone[..16]
+                );
             }
 
             // Store LLM review result
