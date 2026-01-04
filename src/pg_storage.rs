@@ -2624,7 +2624,20 @@ pub struct PublicAgentAssignments {
 impl PgStorage {
     /// Reset validator assignments for an agent (SUDO: relaunch evaluation)
     pub async fn reset_agent_assignments(&self, agent_hash: &str) -> Result<()> {
-        let client = self.pool.get().await?;
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get db connection: {}", e))?;
+
+        // Delete existing evaluations first (foreign key constraint)
+        client
+            .execute(
+                "DELETE FROM validator_evaluations WHERE agent_hash = $1",
+                &[&agent_hash],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to delete evaluations: {}", e))?;
 
         // Delete existing assignments
         client
@@ -2632,18 +2645,39 @@ impl PgStorage {
                 "DELETE FROM validator_assignments WHERE agent_hash = $1",
                 &[&agent_hash],
             )
-            .await?;
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to delete assignments: {}", e))?;
 
-        // Reset submission status to pending
+        // Reset submission status to pending and clear pending_evaluations
         client
             .execute(
                 "UPDATE submissions SET status = 'pending' WHERE agent_hash = $1",
                 &[&agent_hash],
             )
-            .await?;
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to update submission status: {}", e))?;
+
+        client
+            .execute(
+                "UPDATE pending_evaluations SET status = 'pending', validators_completed = 0 WHERE agent_hash = $1",
+                &[&agent_hash],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to reset pending_evaluations: {}", e))?;
 
         // Re-assign validators (get from default selection)
-        let validators = self.get_active_validators(3).await?;
+        let validators = self
+            .get_active_validators(3)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get validators: {}", e))?;
+
+        if validators.is_empty() {
+            warn!(
+                "No validators available for assignment, agent {} will wait for validators",
+                agent_hash
+            );
+        }
+
         for validator in validators {
             client
                 .execute(
@@ -2651,7 +2685,8 @@ impl PgStorage {
                      VALUES ($1, $2, 'pending', NOW())",
                     &[&agent_hash, &validator],
                 )
-                .await?;
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to insert assignment for {}: {}", validator, e))?;
         }
 
         info!("Reset assignments for agent {}", agent_hash);
