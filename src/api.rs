@@ -2248,8 +2248,9 @@ fn verify_sudo_request(
         return err("Request timestamp expired");
     }
 
-    // Get expected owner from environment
-    let expected_owner = std::env::var("SUBNET_OWNER_HOTKEY").unwrap_or_default();
+    // Get expected owner from environment (with default for term-challenge)
+    let expected_owner = std::env::var("SUBNET_OWNER_HOTKEY")
+        .unwrap_or_else(|_| "5GziQCcRpN8NCJktX343brnfuVe3w6gUYieeStXPD1Dag2At".to_string());
     if expected_owner.is_empty() {
         return err("Subnet owner not configured");
     }
