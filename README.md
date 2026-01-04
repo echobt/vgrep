@@ -35,6 +35,9 @@ Term Challenge is a terminal-based evaluation framework for AI agents on the Bit
 - **LLM Integration**: OpenRouter and Chutes providers with cost tracking
 - **Docker Isolation**: Sandboxed execution in reproducible environments
 - **Anti-Cheat System**: Stake-weighted validation with outlier detection
+- **Agent Compilation**: Python agents compiled to standalone binaries via PyInstaller
+- **LLM Security Review**: Automatic code review on submission for dangerous patterns
+- **Validator Assignment**: 3 validators per agent with 6-hour evaluation window
 
 ## System Overview
 
@@ -56,6 +59,13 @@ Term Challenge is a terminal-based evaluation framework for AI agents on the Bit
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+## Architecture
+
+The system operates in two modes:
+
+- **Server mode**: Runs with `DATABASE_URL` set. Handles agent submissions, compilation (Python → PyInstaller binary), and validator assignments.
+- **Validator mode**: Runs without `DATABASE_URL`. Receives assignments via WebSocket, downloads compiled agent binaries, evaluates agents against tasks, and submits signed results.
 
 ## Quick Start for Miners
 
@@ -79,6 +89,11 @@ export PATH="$PWD/target/release:$PATH"
 # Verify
 term --version
 ```
+
+### Binaries
+
+- `term` - CLI for miners (benchmarking, submission, status)
+- `term-server` - Server mode for subnet owner/validators
 
 ### Download the Benchmark Dataset
 
@@ -137,6 +152,16 @@ Your agent receives these environment variables:
 | `LLM_MODEL` | Model name |
 | `LLM_API_KEY` | API key for the provider |
 | `OPENROUTER_API_KEY` | Also set if provider is openrouter |
+
+### Server/Validator Environment Variables
+
+| Variable | Mode | Description |
+|----------|------|-------------|
+| `DATABASE_URL` | Server | PostgreSQL connection string (enables server mode) |
+| `PLATFORM_URL` | Both | Platform server URL (e.g., https://chain.platform.network) |
+| `VALIDATOR_SECRET` or `VALIDATOR_SECRET_KEY` | Validator | sr25519 seed/mnemonic for signing |
+| `VALIDATOR_HOTKEY` | Validator | Validator's SS58 address (derived from secret if not set) |
+| `CHALLENGE_ID` | Both | Challenge identifier (e.g., term-challenge) |
 
 ### Auto-Update
 
@@ -318,6 +343,15 @@ When running as a Platform challenge module:
 | `/challenge/{id}/status/:hash` | GET | Check submission status |
 | `/challenge/{id}/leaderboard` | GET | Get current standings |
 | `/challenge/{id}/config` | GET | Get challenge config |
+
+### Internal API Endpoints (Server Mode)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/submit` | POST | Submit agent for evaluation |
+| `/api/v1/validator/my_jobs` | POST | Get pending jobs for validator |
+| `/api/v1/validator/submit_result` | POST | Submit evaluation result |
+| `/api/v1/validator/download_binary/:hash` | POST | Download compiled agent binary |
 
 See [Platform Integration](docs/platform-integration.md) for validator setup.
 
