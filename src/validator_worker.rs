@@ -14,7 +14,7 @@ use crate::validator_ws_client::ValidatorEvent;
 use anyhow::{Context, Result};
 use base64::Engine;
 use sp_core::{sr25519, Pair};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
@@ -52,6 +52,8 @@ pub struct ValidatorWorker {
     task_registry: Arc<RwLock<Option<TaskRegistry>>>,
     /// Container backend for running tasks (broker or direct Docker)
     container_backend: Arc<dyn ContainerBackend>,
+    /// Binary cache to avoid re-downloading (agent_hash -> binary)
+    binary_cache: Arc<RwLock<HashMap<String, Vec<u8>>>>,
 }
 
 impl ValidatorWorker {
@@ -80,6 +82,7 @@ impl ValidatorWorker {
             in_progress: Arc::new(RwLock::new(HashSet::new())),
             task_registry: Arc::new(RwLock::new(None)),
             container_backend,
+            binary_cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -201,6 +204,7 @@ impl ValidatorWorker {
             in_progress: self.in_progress.clone(),
             task_registry: self.task_registry.clone(),
             container_backend: self.container_backend.clone(),
+            binary_cache: self.binary_cache.clone(),
         }
     }
 
@@ -390,8 +394,21 @@ impl ValidatorWorker {
         Ok(jobs)
     }
 
-    /// Download compiled binary via bridge
+    /// Download compiled binary via bridge (with caching)
     async fn download_binary(&self, agent_hash: &str) -> Result<Vec<u8>> {
+        // Check cache first
+        {
+            let cache = self.binary_cache.read().await;
+            if let Some(binary) = cache.get(agent_hash) {
+                debug!(
+                    "Binary cache hit for agent {} ({} bytes)",
+                    &agent_hash[..16.min(agent_hash.len())],
+                    binary.len()
+                );
+                return Ok(binary.clone());
+            }
+        }
+
         let url = format!(
             "{}/api/v1/bridge/{}/api/v1/validator/download_binary/{}",
             self.platform_url, self.challenge_id, agent_hash
@@ -425,6 +442,19 @@ impl ValidatorWorker {
 
         if binary.is_empty() {
             anyhow::bail!("Downloaded binary is empty");
+        }
+
+        // Cache the binary
+        {
+            let mut cache = self.binary_cache.write().await;
+            cache.insert(agent_hash.to_string(), binary.clone());
+            // Limit cache size to prevent memory issues (keep last 20 binaries)
+            if cache.len() > 20 {
+                // Remove oldest entry (simple LRU-ish approach)
+                if let Some(oldest_key) = cache.keys().next().cloned() {
+                    cache.remove(&oldest_key);
+                }
+            }
         }
 
         Ok(binary)
