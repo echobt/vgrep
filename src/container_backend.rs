@@ -948,10 +948,19 @@ struct WsBrokerContainerHandle {
 impl WsBrokerContainerHandle {
     async fn send_request(&self, request: &BrokerRequest) -> Result<BrokerResponse> {
         use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
-        let (ws_stream, _) = connect_async(&self.ws_url)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to broker WS: {}", e))?;
+        // Use custom config with larger max message size for file transfers
+        let config = WebSocketConfig {
+            max_message_size: Some(256 * 1024 * 1024), // 256 MB
+            max_frame_size: Some(64 * 1024 * 1024),    // 64 MB per frame
+            ..Default::default()
+        };
+
+        let (ws_stream, _) =
+            tokio_tungstenite::connect_async_with_config(&self.ws_url, Some(config), false)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to connect to broker WS: {}", e))?;
 
         let (mut write, mut read) = ws_stream.split();
 
@@ -962,14 +971,35 @@ impl WsBrokerContainerHandle {
 
         // Send request
         let request_json = serde_json::to_string(request)?;
+        debug!(
+            "Sending request: {}",
+            &request_json[..100.min(request_json.len())]
+        );
         write.send(Message::Text(request_json)).await?;
 
-        if let Some(Ok(Message::Text(text))) = read.next().await {
-            let response: BrokerResponse = serde_json::from_str(&text)?;
-            return Ok(response);
+        // Wait for response with timeout for large transfers
+        let response_timeout = std::time::Duration::from_secs(120);
+        match tokio::time::timeout(response_timeout, read.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                debug!("Received response: {} bytes", text.len());
+                let response: BrokerResponse = serde_json::from_str(&text).map_err(|e| {
+                    anyhow::anyhow!("Failed to parse response ({}): {}", text.len(), e)
+                })?;
+                Ok(response)
+            }
+            Ok(Some(Ok(other))) => {
+                bail!("Unexpected message type from broker: {:?}", other)
+            }
+            Ok(Some(Err(e))) => {
+                bail!("WebSocket error: {}", e)
+            }
+            Ok(None) => {
+                bail!("Connection closed by broker")
+            }
+            Err(_) => {
+                bail!("Timeout waiting for response (120s)")
+            }
         }
-
-        bail!("No response from broker")
     }
 
     fn request_id() -> String {
@@ -1061,26 +1091,52 @@ impl ContainerHandle for WsBrokerContainerHandle {
     async fn write_file(&self, path: &str, content: &[u8]) -> Result<()> {
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(content);
-        let cmd = format!("echo '{}' | base64 -d > {}", b64, path);
-        let result = self.exec(&["sh", "-c", &cmd]).await?;
-        if !result.success() {
-            bail!("Failed to write file: {}", result.stderr);
+
+        // Use CopyTo protocol message for reliable file transfer
+        let request = BrokerRequest::CopyTo {
+            container_id: self.container_id.clone(),
+            path: path.to_string(),
+            data: b64,
+            request_id: Self::request_id(),
+        };
+
+        match self.send_request(&request).await? {
+            BrokerResponse::CopyToResult { .. } => Ok(()),
+            BrokerResponse::Error { error, .. } => bail!("CopyTo failed: {}", error),
+            _ => bail!("Unexpected response for CopyTo"),
         }
-        Ok(())
     }
 
     async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
         use base64::Engine;
-        let result = self
-            .exec(&["sh", "-c", &format!("base64 {}", path)])
-            .await?;
-        if !result.success() {
-            bail!("Failed to read file: {}", result.stderr);
+
+        // Use CopyFrom protocol message for reliable file transfer
+        info!(
+            "CopyFrom: Reading file {} from container {}",
+            path, self.container_id
+        );
+        let request = BrokerRequest::CopyFrom {
+            container_id: self.container_id.clone(),
+            path: path.to_string(),
+            request_id: Self::request_id(),
+        };
+
+        let response = self
+            .send_request(&request)
+            .await
+            .map_err(|e| anyhow::anyhow!("CopyFrom request failed: {}", e))?;
+
+        match response {
+            BrokerResponse::CopyFromResult { data, size, .. } => {
+                info!("CopyFrom received {} bytes from {}", size, path);
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(&data)
+                    .map_err(|e| anyhow::anyhow!("Failed to decode CopyFrom data: {}", e))?;
+                Ok(decoded)
+            }
+            BrokerResponse::Error { error, .. } => bail!("CopyFrom failed: {}", error),
+            other => bail!("Unexpected response for CopyFrom: {:?}", other),
         }
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(result.stdout.trim())
-            .map_err(|e| anyhow::anyhow!("Failed to decode: {}", e))?;
-        Ok(decoded)
     }
 }
 

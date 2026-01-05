@@ -811,6 +811,7 @@ pub async fn get_leaderboard(
 ///
 /// Supports:
 /// - Hex-encoded 32-byte seed (with or without 0x prefix)
+/// - URI format with derivation path (e.g., "mnemonic words//path")
 /// - BIP39 mnemonic phrase (12 or 24 words)
 fn load_validator_keypair() -> anyhow::Result<sp_core::sr25519::Pair> {
     use sp_core::{sr25519, Pair};
@@ -835,7 +836,13 @@ fn load_validator_keypair() -> anyhow::Result<sp_core::sr25519::Pair> {
         }
     }
 
-    // Try mnemonic phrase
+    // Try URI format (supports derivation paths like "mnemonic//hard/soft")
+    // This is the most flexible format used by subkey and substrate tools
+    if let Ok((pair, _)) = sr25519::Pair::from_string_with_seed(secret, None) {
+        return Ok(pair);
+    }
+
+    // Try mnemonic phrase without derivation
     sr25519::Pair::from_phrase(secret, None)
         .map(|(pair, _)| pair)
         .map_err(|e| anyhow::anyhow!("Invalid secret key format: {:?}", e))

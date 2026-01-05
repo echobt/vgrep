@@ -14,19 +14,25 @@ WORKDIR /build
 
 # Stage 2: Planner - analyze dependencies
 FROM chef AS planner
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-COPY bin ./bin
-COPY migrations ./migrations
+# ARG for flexible path configuration (from parent directory context)
+ARG TERM_REPO_PATH=.
+COPY ${TERM_REPO_PATH}/Cargo.toml ${TERM_REPO_PATH}/Cargo.lock ./
+COPY ${TERM_REPO_PATH}/src ./src
+COPY ${TERM_REPO_PATH}/bin ./bin
+COPY ${TERM_REPO_PATH}/migrations ./migrations
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 3: Build Rust binaries
 FROM chef AS builder
 
-# Install build dependencies
+# ARG for flexible path configuration
+ARG TERM_REPO_PATH=.
+
+# Install build dependencies (git needed for git dependencies)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Build dependencies first (this layer is cached if dependencies don't change)
@@ -34,10 +40,10 @@ COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # Copy source and build (only source changes trigger this)
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-COPY bin ./bin
-COPY migrations ./migrations
+COPY ${TERM_REPO_PATH}/Cargo.toml ${TERM_REPO_PATH}/Cargo.lock ./
+COPY ${TERM_REPO_PATH}/src ./src
+COPY ${TERM_REPO_PATH}/bin ./bin
+COPY ${TERM_REPO_PATH}/migrations ./migrations
 
 # Build release binaries (dependencies already cached above)
 RUN cargo build --release --bin term --bin term-server
@@ -80,8 +86,11 @@ WORKDIR /app
 COPY --from=builder /build/target/release/term /usr/local/bin/
 COPY --from=builder /build/target/release/term-server /usr/local/bin/
 
+# ARG for flexible path configuration
+ARG TERM_REPO_PATH=.
+
 # Copy Python SDK only (Python is the only supported agent language)
-COPY sdk/python /opt/term-sdk/python
+COPY ${TERM_REPO_PATH}/sdk/python /opt/term-sdk/python
 
 # Install Python SDK globally (term_sdk module)
 RUN cd /opt/term-sdk/python && \

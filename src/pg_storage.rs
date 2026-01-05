@@ -2200,18 +2200,25 @@ impl PgStorage {
 
         // Enhanced logging for failures
         if !log.passed {
+            // Helper to truncate long strings for log output
+            let truncate = |s: &str, max: usize| -> String {
+                if s.len() > max {
+                    format!("{}...(truncated {} chars)", &s[..max], s.len() - max)
+                } else {
+                    s.to_string()
+                }
+            };
+
             warn!(
-                "Task FAILED: {} {} task={} error={:?} stage={:?} stderr={:?}",
+                "Task FAILED: {} {} task={} steps={:?} error={:?} stage={:?} stderr={:?} test_output={:?}",
                 &log.validator_hotkey[..16.min(log.validator_hotkey.len())],
                 &log.agent_hash[..16.min(log.agent_hash.len())],
                 log.task_name,
-                log.error,
+                log.steps_executed,
+                log.error.as_ref().map(|s| truncate(s, 200)),
                 log.failure_stage,
-                log.agent_stderr.as_ref().map(|s| if s.len() > 200 {
-                    format!("{}...", &s[..200])
-                } else {
-                    s.clone()
-                }),
+                log.agent_stderr.as_ref().map(|s| truncate(s, 300)),
+                log.test_output.as_ref().map(|s| truncate(s, 300)),
             );
         } else {
             info!(

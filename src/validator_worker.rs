@@ -584,11 +584,16 @@ impl ValidatorWorker {
         }
 
         // Write binary to temp file
+        // IMPORTANT: We must close the file handle before executing to avoid "Text file busy" error on Linux
         let mut temp_file = NamedTempFile::new().context("Failed to create temp file")?;
         temp_file
             .write_all(binary)
             .context("Failed to write binary")?;
-        let binary_path = temp_file.path().to_string_lossy().to_string();
+        temp_file.flush().context("Failed to flush binary")?;
+
+        // Get path and convert to TempPath (this closes the file handle but keeps the path valid)
+        let temp_path = temp_file.into_temp_path();
+        let binary_path = temp_path.to_string_lossy().to_string();
 
         // Make executable
         #[cfg(unix)]
@@ -598,6 +603,9 @@ impl ValidatorWorker {
             perms.set_mode(0o755);
             std::fs::set_permissions(&binary_path, perms)?;
         }
+
+        // Keep temp_path alive (it will be deleted when dropped at end of function)
+        let _temp_path_guard = temp_path;
 
         // Get real tasks from terminal-bench@2.0
         let tasks = self.get_evaluation_tasks().await?;
@@ -1052,6 +1060,7 @@ impl ValidatorWorker {
     }
 
     /// Log individual task result to platform server with verbose details
+    #[allow(clippy::too_many_arguments)]
     async fn log_task_result(
         &self,
         agent_hash: &str,
@@ -1277,15 +1286,18 @@ mod tests {
 
     #[test]
     fn test_map_path_for_dind_cache() {
-        // Simulate Docker-in-Docker environment
-        std::env::set_var("HOST_CACHE_DIR", "/tmp/platform-cache");
+        // Simulate Docker-in-Docker environment with Docker volume paths
+        std::env::set_var(
+            "HOST_CACHE_DIR",
+            "/var/lib/docker/volumes/term-challenge-cache/_data",
+        );
         std::env::set_var("CACHE_DIR", "/root/.cache/term-challenge");
 
         let input = "/root/.cache/term-challenge/datasets/custom-memory-heap-crash";
         let output = map_path_for_dind(input);
         assert_eq!(
             output,
-            "/tmp/platform-cache/datasets/custom-memory-heap-crash"
+            "/var/lib/docker/volumes/term-challenge-cache/_data/datasets/custom-memory-heap-crash"
         );
 
         // Clean up
@@ -1295,13 +1307,19 @@ mod tests {
 
     #[test]
     fn test_map_path_for_dind_tasks() {
-        // Simulate Docker-in-Docker environment
-        std::env::set_var("HOST_TASKS_DIR", "/tmp/platform-tasks");
+        // Simulate Docker-in-Docker environment with Docker volume paths
+        std::env::set_var(
+            "HOST_TASKS_DIR",
+            "/var/lib/docker/volumes/term-challenge-tasks/_data",
+        );
         std::env::set_var("TASKS_DIR", "/app/data/tasks");
 
         let input = "/app/data/tasks/some-task";
         let output = map_path_for_dind(input);
-        assert_eq!(output, "/tmp/platform-tasks/some-task");
+        assert_eq!(
+            output,
+            "/var/lib/docker/volumes/term-challenge-tasks/_data/some-task"
+        );
 
         // Clean up
         std::env::remove_var("HOST_TASKS_DIR");
@@ -1312,7 +1330,10 @@ mod tests {
     fn test_map_path_for_dind_unaffected_path() {
         // A path that doesn't match any mapping patterns should be unchanged
         // even if env vars are set
-        std::env::set_var("HOST_CACHE_DIR", "/tmp/platform-cache");
+        std::env::set_var(
+            "HOST_CACHE_DIR",
+            "/var/lib/docker/volumes/term-challenge-cache/_data",
+        );
         std::env::set_var("CACHE_DIR", "/root/.cache/term-challenge");
 
         let input = "/some/random/path/that/doesnt/match";

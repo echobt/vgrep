@@ -29,7 +29,10 @@ const COMPILE_TIMEOUT_SECS: u64 = 300;
 const MAX_BINARY_SIZE: usize = 100 * 1024 * 1024;
 
 /// Docker image for compilation
-const COMPILER_IMAGE: &str = "python:3.11-slim";
+/// Using python:3.11-bookworm for glibc compatibility with Debian 12 runtime
+/// (python:3.11 is now based on Debian 13/trixie which has glibc 2.38,
+/// but our validators run on Debian 12/bookworm with older glibc)
+const COMPILER_IMAGE: &str = "python:3.11-bookworm";
 
 /// Result of agent compilation
 #[derive(Debug)]
@@ -165,25 +168,27 @@ async fn run_compilation_steps(
         .context("Failed to write agent code")?;
 
     // Install system dependencies and PyInstaller
+    // Note: We use python:3.11 (full image) which includes binutils
+    // For slim images, we need to install binutils first
     info!("Installing PyInstaller in container...");
-    let install_result = container
+
+    // First try to install binutils (may fail on some images, that's ok)
+    let _ = container
         .exec(&[
             "sh",
             "-c",
-            "apt-get update -qq && apt-get install -y -qq binutils > /dev/null 2>&1 && \
-             pip install --quiet --no-cache-dir pyinstaller",
+            "apt-get update -qq 2>/dev/null && apt-get install -y -qq binutils 2>/dev/null || true",
         ])
+        .await;
+
+    // Install PyInstaller
+    let install_result = container
+        .exec(&["pip", "install", "--quiet", "--no-cache-dir", "pyinstaller"])
         .await?;
 
     if !install_result.success() {
-        warn!("PyInstaller install stderr: {}", install_result.stderr);
-        // Try without apt-get (might already have binutils)
-        let fallback = container
-            .exec(&["pip", "install", "--quiet", "--no-cache-dir", "pyinstaller"])
-            .await?;
-        if !fallback.success() {
-            anyhow::bail!("Failed to install PyInstaller: {}", fallback.stderr);
-        }
+        warn!("PyInstaller install failed: {}", install_result.stderr);
+        anyhow::bail!("Failed to install PyInstaller: {}", install_result.stderr);
     }
 
     // Try to install term_sdk (not critical if it fails)
@@ -241,11 +246,32 @@ async fn run_compilation_steps(
         }
     }
 
-    // Read the compiled binary
+    // Check if binary exists first
+    let check = container
+        .exec(&["ls", "-la", "/compile/dist/agent"])
+        .await
+        .context("Failed to check binary existence")?;
+
+    if !check.success() {
+        // List what's in dist directory for debugging
+        let list = container.exec(&["ls", "-la", "/compile/dist/"]).await;
+        let dir_contents = list.map(|r| r.combined()).unwrap_or_default();
+        anyhow::bail!(
+            "Binary not found at /compile/dist/agent. Directory contents: {}",
+            dir_contents
+        );
+    }
+
+    info!("Binary exists: {}", check.stdout.trim());
+
+    // Read the compiled binary using Docker archive API via read_file
+    // This uses CopyFrom protocol which transfers via Docker's archive API
+    // (much more reliable than exec + base64 for large files)
+    info!("Reading binary via Docker archive API...");
     let binary = container
         .read_file("/compile/dist/agent")
         .await
-        .context("Failed to read compiled binary - file may not exist")?;
+        .context("Failed to read compiled binary via CopyFrom")?;
 
     if binary.is_empty() {
         anyhow::bail!("Compiled binary is empty");

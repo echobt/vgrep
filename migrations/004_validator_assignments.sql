@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS validator_assignments (
     id TEXT PRIMARY KEY,
     agent_hash TEXT NOT NULL,
     validator_hotkey TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
     assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(agent_hash, validator_hotkey)
 );
