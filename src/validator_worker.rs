@@ -854,8 +854,10 @@ impl ValidatorWorker {
                 .and_then(|line| serde_json::from_str(line).ok())
                 .unwrap_or_default();
 
-            // Check if agent is done
-            if response["done"].as_bool().unwrap_or(false) {
+            // Check if agent is done (support both "done" and "task_complete" for SDK compatibility)
+            if response["done"].as_bool().unwrap_or(false)
+                || response["task_complete"].as_bool().unwrap_or(false)
+            {
                 debug!("Agent signaled completion at step {}", step);
                 return Ok((true, accumulated_stderr));
             }
