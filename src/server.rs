@@ -900,7 +900,8 @@ pub async fn llm_local_proxy(
         .as_secs() as i64;
 
     // Sign with validator's sr25519 keypair
-    let message = format!("llm_proxy:{}:{}", req.agent_hash, timestamp);
+    // Message format must match what central server expects: "llm_chat:{timestamp}:{agent_hash}"
+    let message = format!("llm_chat:{}:{}", timestamp, req.agent_hash);
     let signature_bytes = keypair.sign(message.as_bytes());
     let signature = format!("0x{}", hex::encode(signature_bytes.0));
 
@@ -1009,7 +1010,8 @@ pub async fn llm_local_proxy_stream(
         .as_secs() as i64;
 
     // Sign with validator's sr25519 keypair
-    let message = format!("llm_proxy:{}:{}", req.agent_hash, timestamp);
+    // Message format must match what central server expects: "llm_chat:{timestamp}:{agent_hash}"
+    let message = format!("llm_chat:{}:{}", timestamp, req.agent_hash);
     let signature_bytes = keypair.sign(message.as_bytes());
     let signature = format!("0x{}", hex::encode(signature_bytes.0));
 
