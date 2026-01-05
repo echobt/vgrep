@@ -29,10 +29,10 @@ const COMPILE_TIMEOUT_SECS: u64 = 300;
 const MAX_BINARY_SIZE: usize = 100 * 1024 * 1024;
 
 /// Docker image for compilation
-/// Using python:3.11-bookworm for glibc compatibility with Debian 12 runtime
-/// (python:3.11 is now based on Debian 13/trixie which has glibc 2.38,
-/// but our validators run on Debian 12/bookworm with older glibc)
-const COMPILER_IMAGE: &str = "python:3.11-bookworm";
+/// Using python:3.11-slim-bullseye for maximum glibc compatibility
+/// Debian 11 (bullseye) has glibc 2.31, which is compatible with most runtime images
+/// including older Ubuntu/Debian based task containers
+const COMPILER_IMAGE: &str = "python:3.11-slim-bullseye";
 
 /// Result of agent compilation
 #[derive(Debug)]
