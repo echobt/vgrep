@@ -213,6 +213,8 @@ async fn run_compilation_steps(
     install_full_sdk_in_container(container).await?;
 
     // Run PyInstaller
+    // Note: --noupx disables UPX compression which can cause extraction issues
+    // on some systems due to glibc/compression incompatibilities
     info!("Running PyInstaller...");
     let pyinstaller_result = container
         .exec(&[
@@ -220,6 +222,7 @@ async fn run_compilation_steps(
             "--onefile",
             "--clean",
             "--noconfirm",
+            "--noupx",
             "--log-level=WARN",
             "--distpath=/compile/dist",
             "--workpath=/compile/build",

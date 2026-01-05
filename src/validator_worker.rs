@@ -958,12 +958,21 @@ impl ValidatorWorker {
 
             // Run agent binary to get next command
             // Pass LLM proxy environment variables so agent can use centralized LLM API
+            // Set TMPDIR to /tmp/pyinstaller to avoid extraction issues in some containers
             let agent_response = tokio::time::timeout(Duration::from_secs(30), async {
+                // Ensure PyInstaller temp directory exists
+                let pyinstaller_tmp = "/tmp/pyinstaller";
+                let _ = std::fs::create_dir_all(pyinstaller_tmp);
+
                 let mut child = Command::new(binary_path)
                     .env("LLM_PROXY_URL", llm_proxy_url)
                     .env("TERM_AGENT_HASH", agent_hash)
                     .env("TERM_TASK_ID", task_id)
                     .env("EVALUATION_MODE", "true")
+                    // PyInstaller extraction settings to avoid /tmp issues
+                    .env("TMPDIR", pyinstaller_tmp)
+                    .env("TEMP", pyinstaller_tmp)
+                    .env("TMP", pyinstaller_tmp)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
