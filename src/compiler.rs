@@ -320,19 +320,25 @@ async fn install_full_sdk_in_container(
     exec_checked(container, &["mkdir", "-p", "/compile/term_sdk"]).await?;
 
     // Read SDK files from the installed location and copy to compile container
-    // The SDK is installed at /opt/term-sdk/python in the term-server container
-    let sdk_path = std::path::Path::new("/opt/term-sdk/python/term_sdk");
+    // Try multiple paths depending on container vs local environment
+    let sdk_paths = [
+        "/opt/term-sdk/python/term_sdk", // Validator container (Dockerfile)
+        "/app/sdk/python/term_sdk",      // Server container (Dockerfile.server)
+        "sdk/python/term_sdk",           // Local development
+    ];
 
-    // If running locally (not in container), try alternate paths
-    let sdk_path = if sdk_path.exists() {
-        sdk_path.to_path_buf()
-    } else {
-        // Try relative path for local development
-        let alt_path = std::path::Path::new("sdk/python/term_sdk");
-        if alt_path.exists() {
-            alt_path.to_path_buf()
-        } else {
-            // Fallback to minimal SDK
+    let sdk_path = sdk_paths
+        .iter()
+        .map(std::path::Path::new)
+        .find(|p| p.exists())
+        .map(|p| p.to_path_buf());
+
+    let sdk_path = match sdk_path {
+        Some(path) => {
+            debug!("Found SDK at: {}", path.display());
+            path
+        }
+        None => {
             warn!("SDK not found at expected paths, using minimal inline version");
             return create_minimal_sdk_in_container(container).await;
         }

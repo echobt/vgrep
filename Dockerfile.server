@@ -13,12 +13,13 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy project files
-COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-COPY bin ./bin
-COPY sdk ./sdk
-COPY migrations ./migrations
+# Copy project files (paths relative to build context which may be parent directory)
+ARG TERM_REPO_PATH=.
+COPY ${TERM_REPO_PATH}/Cargo.toml ${TERM_REPO_PATH}/Cargo.lock ./
+COPY ${TERM_REPO_PATH}/src ./src
+COPY ${TERM_REPO_PATH}/bin ./bin
+COPY ${TERM_REPO_PATH}/sdk ./sdk
+COPY ${TERM_REPO_PATH}/migrations ./migrations
 
 # Build term-server binary
 RUN cargo build --release --bin term-server
