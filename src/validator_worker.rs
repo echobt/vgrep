@@ -835,12 +835,16 @@ impl ValidatorWorker {
 
         // Run the agent binary against this task
         let instruction = task.instruction();
+        let llm_proxy_url = format!("http://{}:{}", validator_hostname, validator_port);
         let (agent_completed, agent_stderr, steps_executed) = self
             .run_agent_loop(
                 task_container.as_ref(),
                 binary_path,
                 instruction,
                 timeout_secs,
+                agent_hash,
+                task_id,
+                &llm_proxy_url,
             )
             .await
             .unwrap_or((false, String::new(), 0));
@@ -912,6 +916,9 @@ impl ValidatorWorker {
         binary_path: &str,
         instruction: &str,
         _timeout_secs: u64,
+        agent_hash: &str,
+        task_id: &str,
+        llm_proxy_url: &str,
     ) -> Result<(bool, String, i32)> {
         use std::process::Stdio;
         use tokio::io::AsyncWriteExt;
@@ -933,8 +940,13 @@ impl ValidatorWorker {
             });
 
             // Run agent binary to get next command
+            // Pass LLM proxy environment variables so agent can use centralized LLM API
             let agent_response = tokio::time::timeout(Duration::from_secs(30), async {
                 let mut child = Command::new(binary_path)
+                    .env("LLM_PROXY_URL", llm_proxy_url)
+                    .env("TERM_AGENT_HASH", agent_hash)
+                    .env("TERM_TASK_ID", task_id)
+                    .env("EVALUATION_MODE", "true")
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
