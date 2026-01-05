@@ -934,25 +934,33 @@ impl ValidatorWorker {
             self.platform_url, self.challenge_id
         );
 
-        let timestamp = std::time::SystemTime::now()
+        let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
 
-        let message = format!("log_task:{}:{}:{}", agent_hash, task_id, timestamp);
+        let message = format!("log_task:{}:{}:{}", agent_hash, task_id, now);
         let signature = self.sign_message(&message);
 
+        // API expects these fields from LogTaskRequest
         let response = self
             .http_client
             .post(&url)
             .json(&serde_json::json!({
-                "agent_hash": agent_hash,
                 "validator_hotkey": self.validator_hotkey,
-                "task_id": task_id,
-                "passed": passed,
-                "duration_ms": duration_ms,
-                "error": error,
-                "timestamp": timestamp,
                 "signature": signature,
+                "timestamp": now,
+                "agent_hash": agent_hash,
+                "task_id": task_id,
+                "task_name": task_id,  // Use task_id as task_name
+                "passed": passed,
+                "score": if passed { 1.0 } else { 0.0 },
+                "execution_time_ms": duration_ms,
+                "steps": 0,  // Not tracked currently
+                "cost_usd": 0.0,  // Not tracked currently
+                "error": error,
+                "execution_log": null,
+                "trajectory": null,
+                "started_at": now - (duration_ms / 1000),
             }))
             .send()
             .await?;
