@@ -201,7 +201,14 @@ async fn run_compilation_steps(
     // Install PyInstaller
     info!("Installing PyInstaller in container...");
     let install_result = container
-        .exec(&["pip", "install", "--quiet", "--no-cache-dir", "pyinstaller"])
+        .exec(&[
+            "pip",
+            "install",
+            "--quiet",
+            "--no-cache-dir",
+            "--break-system-packages",
+            "pyinstaller",
+        ])
         .await?;
 
     if !install_result.success() {
