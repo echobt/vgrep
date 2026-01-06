@@ -232,6 +232,7 @@ async fn run_compilation_steps(
     // Run PyInstaller
     // Note: --noupx disables UPX compression which can cause extraction issues
     // on some systems due to glibc/compression incompatibilities
+    // --hidden-import includes modules that PyInstaller can't auto-detect (like httpx)
     info!("Running PyInstaller...");
     let pyinstaller_result = container
         .exec(&[
@@ -241,6 +242,7 @@ async fn run_compilation_steps(
             "--noconfirm",
             "--noupx",
             "--log-level=WARN",
+            "--hidden-import=httpx",
             "--distpath=/compile/dist",
             "--workpath=/compile/build",
             "--specpath=/compile",
