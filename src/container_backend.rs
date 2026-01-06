@@ -141,6 +141,9 @@ pub trait ContainerBackend: Send + Sync {
     /// Check if an image exists
     async fn image_exists(&self, image: &str) -> Result<bool>;
 
+    /// Build an image from Dockerfile
+    async fn build_image(&self, tag: &str, dockerfile: &str) -> Result<()>;
+
     /// List containers by challenge
     async fn list_containers(&self, challenge_id: &str) -> Result<Vec<String>>;
 
@@ -286,6 +289,54 @@ impl ContainerBackend for DirectDockerBackend {
             Ok(_) => Ok(true),
             Err(_) => Ok(false),
         }
+    }
+
+    async fn build_image(&self, tag: &str, dockerfile: &str) -> Result<()> {
+        use bollard::image::BuildImageOptions;
+
+        info!("Building image: {}", tag);
+
+        // Create tar with Dockerfile
+        let mut tar_buffer = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_buffer);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(dockerfile.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+
+            builder.append_data(&mut header, "Dockerfile", dockerfile.as_bytes())?;
+            builder.finish()?;
+        }
+
+        let options = BuildImageOptions {
+            t: tag,
+            dockerfile: "Dockerfile",
+            rm: true,
+            forcerm: true,
+            ..Default::default()
+        };
+
+        let mut stream = self
+            .docker
+            .build_image(options, None, Some(tar_buffer.into()));
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(info) => {
+                    if let Some(error) = info.error {
+                        return Err(anyhow::anyhow!("Build failed: {}", error));
+                    }
+                    if let Some(stream) = info.stream {
+                        debug!("{}", stream.trim());
+                    }
+                }
+                Err(e) => return Err(anyhow::anyhow!("Build error: {}", e)),
+            }
+        }
+
+        info!("Image built successfully: {}", tag);
+        Ok(())
     }
 
     async fn list_containers(&self, challenge_id: &str) -> Result<Vec<String>> {
@@ -629,6 +680,31 @@ impl ContainerBackend for SecureBrokerBackend {
     async fn image_exists(&self, _image: &str) -> Result<bool> {
         // Broker always pulls if needed
         Ok(true)
+    }
+
+    async fn build_image(&self, tag: &str, dockerfile: &str) -> Result<()> {
+        use base64::Engine;
+
+        info!("Requesting broker build for image: {}", tag);
+
+        let dockerfile_b64 = base64::engine::general_purpose::STANDARD.encode(dockerfile);
+
+        let request = BrokerRequest::Build {
+            tag: tag.to_string(),
+            dockerfile: dockerfile_b64,
+            context: None,
+            request_id: Self::request_id(),
+        };
+
+        match self.send_request(&request).await? {
+            BrokerResponse::Built { image_id, logs, .. } => {
+                info!("Broker build successful. Image ID: {}", image_id);
+                debug!("Build logs:\n{}", logs);
+                Ok(())
+            }
+            BrokerResponse::Error { error, .. } => bail!("Build failed: {}", error),
+            _ => bail!("Unexpected response for Build"),
+        }
     }
 
     async fn list_containers(&self, challenge_id: &str) -> Result<Vec<String>> {
@@ -982,7 +1058,34 @@ impl ContainerBackend for WsBrokerBackend {
     }
 
     async fn image_exists(&self, _image: &str) -> Result<bool> {
-        Ok(true)
+        // Assume image exists or will be pulled/built
+        // The broker handles this better
+        Ok(false)
+    }
+
+    async fn build_image(&self, tag: &str, dockerfile: &str) -> Result<()> {
+        use base64::Engine;
+
+        info!("Requesting remote build for image: {}", tag);
+
+        let dockerfile_b64 = base64::engine::general_purpose::STANDARD.encode(dockerfile);
+
+        let request = BrokerRequest::Build {
+            tag: tag.to_string(),
+            dockerfile: dockerfile_b64,
+            context: None,
+            request_id: Self::request_id(),
+        };
+
+        match self.send_request(&request).await? {
+            BrokerResponse::Built { image_id, logs, .. } => {
+                info!("Remote build successful. Image ID: {}", image_id);
+                debug!("Build logs:\n{}", logs);
+                Ok(())
+            }
+            BrokerResponse::Error { error, .. } => bail!("Build failed: {}", error),
+            _ => bail!("Unexpected response for Build"),
+        }
     }
 
     async fn list_containers(&self, challenge_id: &str) -> Result<Vec<String>> {

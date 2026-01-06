@@ -615,45 +615,60 @@ if __name__ == "__main__":
     )
 }
 
-/// Build the term-compiler Docker image from Dockerfile.compiler
+/// Ensure the term-compiler Docker image is available
 ///
-/// This function should be called once at server startup to ensure the
-/// compiler image is available for all subsequent compilation tasks.
-///
-/// # Errors
-///
-/// Returns an error if the Docker build fails. This is fatal and the
-/// server should not continue without the compiler image.
-pub async fn build_compiler_image() -> Result<()> {
-    use std::process::Command;
+/// Uses the provided backend to build the image if needed.
+/// This should be called once at server startup.
+pub async fn build_compiler_image(backend: &Arc<dyn ContainerBackend>) -> Result<()> {
+    // Read Dockerfile content
+    let dockerfile_path = "docker/Dockerfile.compiler";
+    let dockerfile_content = match std::fs::read_to_string(dockerfile_path) {
+        Ok(content) => content,
+        Err(e) => {
+            // If running in container, path might be different or file might not exist
+            // Try relative path or fallback to embedded content if critical
+            warn!("Could not read {}: {}", dockerfile_path, e);
 
-    info!("Building compiler image: {}", COMPILER_IMAGE);
+            // Try absolute path if we know where repo is mounted
+            let abs_path = format!("/app/{}", dockerfile_path);
+            match std::fs::read_to_string(&abs_path) {
+                Ok(content) => content,
+                Err(e2) => {
+                    warn!("Could not read {}: {}", abs_path, e2);
+                    anyhow::bail!(
+                        "Dockerfile not found at {} or {}",
+                        dockerfile_path,
+                        abs_path
+                    );
+                }
+            }
+        }
+    };
 
-    // Build using docker command directly
-    let output = Command::new("docker")
-        .args([
-            "build",
-            "-f",
-            "docker/Dockerfile.compiler",
-            "-t",
-            COMPILER_IMAGE,
-            ".",
-        ])
-        .output()
-        .context("Failed to spawn docker build process")?;
+    info!("Ensuring compiler image {} exists...", COMPILER_IMAGE);
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        error!(
-            "Docker build failed:\nstdout: {}\nstderr: {}",
-            stdout, stderr
-        );
-        anyhow::bail!("Failed to build compiler image: {}", stderr);
+    // Check if image exists using backend
+    if backend.image_exists(COMPILER_IMAGE).await.unwrap_or(false) {
+        info!("Compiler image already exists: {}", COMPILER_IMAGE);
+        return Ok(());
     }
 
-    info!("Compiler image built successfully: {}", COMPILER_IMAGE);
-    Ok(())
+    // Image doesn't exist, try to build via backend
+    info!("Building compiler image via backend: {}", COMPILER_IMAGE);
+
+    match backend
+        .build_image(COMPILER_IMAGE, &dockerfile_content)
+        .await
+    {
+        Ok(_) => {
+            info!("Compiler image built successfully: {}", COMPILER_IMAGE);
+            Ok(())
+        }
+        Err(e) => {
+            error!("Failed to build compiler image: {}", e);
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]

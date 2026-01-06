@@ -1240,10 +1240,25 @@ pub async fn run_server_with_mode(
         );
     }
 
-    // Build the compiler image at startup (once, fatal if fails)
-    if let Err(e) = crate::compiler::build_compiler_image().await {
-        error!("Failed to build compiler image at startup: {}", e);
-        return Err(e);
+    // Initialize container backend for image building
+    match crate::container_backend::create_backend().await {
+        Ok(backend) => {
+            // Try to build the compiler image at startup
+            // This is not fatal - the image may already exist or be built externally
+            match crate::compiler::build_compiler_image(&backend).await {
+                Ok(()) => info!("Compiler image is ready"),
+                Err(e) => {
+                    warn!(
+                        "Could not build compiler image (this may be expected in containerized environments): {}",
+                        e
+                    );
+                    warn!("Ensure term-compiler:latest is available before running compilations");
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Could not initialize container backend at startup: {}", e);
+        }
     }
 
     let state = Arc::new(ChallengeServerState::with_options(
