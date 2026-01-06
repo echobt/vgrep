@@ -32,7 +32,10 @@ const MAX_BINARY_SIZE: usize = 100 * 1024 * 1024;
 /// Using python:3.11-slim-bullseye for maximum glibc compatibility
 /// Debian 11 (bullseye) has glibc 2.31, which is compatible with most runtime images
 /// including older Ubuntu/Debian based task containers
-const COMPILER_IMAGE: &str = "python:3.11-slim-bullseye";
+// Use full python image (not slim) because it includes binutils/objdump
+// which is required by PyInstaller. Slim images require apt-get which
+// may fail in isolated network environments.
+const COMPILER_IMAGE: &str = "python:3.11";
 
 /// Result of agent compilation
 #[derive(Debug)]
@@ -185,30 +188,12 @@ async fn run_compilation_steps(
         .context("Failed to write agent code")?;
 
     // Install system dependencies and PyInstaller
-    // Install binutils (required by PyInstaller for objdump)
-    // This is critical - PyInstaller will fail without it
-    info!("Installing binutils in container...");
-    let binutils_result = container
-        .exec(&[
-            "sh",
-            "-c",
-            "apt-get update -qq && apt-get install -y -qq binutils",
-        ])
-        .await?;
-
-    if !binutils_result.success() {
-        warn!(
-            "binutils install warning (may already be installed): {}",
-            binutils_result.stderr
-        );
-        // Don't fail - binutils might already be present in some images
-    }
-
     // Verify objdump is available (required by PyInstaller)
+    // We use python:3.11 (full image) which includes binutils
     let objdump_check = container.exec(&["which", "objdump"]).await?;
     if !objdump_check.success() {
         anyhow::bail!(
-            "objdump not found after binutils install. PyInstaller requires binutils package."
+            "objdump not found. PyInstaller requires binutils. Use python:3.11 (full) image."
         );
     }
 
