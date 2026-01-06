@@ -631,7 +631,7 @@ pub async fn build_compiler_image() -> Result<()> {
 
     // Build using docker command directly
     let output = Command::new("docker")
-        .args(&[
+        .args([
             "build",
             "-f",
             "docker/Dockerfile.compiler",
