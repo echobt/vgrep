@@ -15,12 +15,6 @@ RUN apt-get update && apt-get install -y \
 
 # Copy project files (paths relative to build context which may be parent directory)
 ARG TERM_REPO_PATH=.
-# Default to sibling directory, but can be overridden
-ARG PLATFORM_REPO_PATH=../platform-repo
-
-# Copy platform dependencies (needed for local development/testing)
-# We copy to a fixed location inside the container
-COPY ${PLATFORM_REPO_PATH}/crates/secure-container-runtime /platform-repo/crates/secure-container-runtime
 
 # Copy term-challenge files
 COPY ${TERM_REPO_PATH}/Cargo.toml ${TERM_REPO_PATH}/Cargo.lock ./
@@ -28,10 +22,6 @@ COPY ${TERM_REPO_PATH}/src ./src
 COPY ${TERM_REPO_PATH}/bin ./bin
 COPY ${TERM_REPO_PATH}/sdk ./sdk
 COPY ${TERM_REPO_PATH}/migrations ./migrations
-
-# Update Cargo.toml to point to the copied platform dependency if needed
-# This handles the case where Cargo.toml uses "../platform-repo" relative path
-RUN sed -i 's|\.\./platform-repo|/platform-repo|g' Cargo.toml
 
 # Build term-server binary
 RUN cargo build --release --bin term-server

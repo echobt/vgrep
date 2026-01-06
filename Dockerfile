@@ -16,19 +16,11 @@ WORKDIR /build
 FROM chef AS planner
 # ARG for flexible path configuration (from parent directory context)
 ARG TERM_REPO_PATH=.
-ARG PLATFORM_REPO_PATH=../platform-repo
-
-# Copy platform dependencies (needed for local development/testing)
-# We copy to a fixed location inside the container
-COPY ${PLATFORM_REPO_PATH}/crates/secure-container-runtime /platform-repo/crates/secure-container-runtime
 
 COPY ${TERM_REPO_PATH}/Cargo.toml ${TERM_REPO_PATH}/Cargo.lock ./
 COPY ${TERM_REPO_PATH}/src ./src
 COPY ${TERM_REPO_PATH}/bin ./bin
 COPY ${TERM_REPO_PATH}/migrations ./migrations
-
-# Update Cargo.toml to point to the copied platform dependency if needed
-RUN sed -i 's|\.\./platform-repo|/platform-repo|g' Cargo.toml
 
 RUN cargo chef prepare --recipe-path recipe.json
 
@@ -37,7 +29,6 @@ FROM chef AS builder
 
 # ARG for flexible path configuration
 ARG TERM_REPO_PATH=.
-ARG PLATFORM_REPO_PATH=../platform-repo
 
 # Install build dependencies (git needed for git dependencies)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -48,7 +39,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Build dependencies first (this layer is cached if dependencies don't change)
 COPY --from=planner /build/recipe.json recipe.json
-COPY --from=planner /platform-repo /platform-repo
 RUN cargo chef cook --release --recipe-path recipe.json
 
 # Copy source and build (only source changes trigger this)
@@ -56,9 +46,6 @@ COPY ${TERM_REPO_PATH}/Cargo.toml ${TERM_REPO_PATH}/Cargo.lock ./
 COPY ${TERM_REPO_PATH}/src ./src
 COPY ${TERM_REPO_PATH}/bin ./bin
 COPY ${TERM_REPO_PATH}/migrations ./migrations
-
-# Update Cargo.toml (again, because we overwrote it)
-RUN sed -i 's|\.\./platform-repo|/platform-repo|g' Cargo.toml
 
 # Build release binaries (dependencies already cached above)
 RUN cargo build --release --bin term --bin term-server
