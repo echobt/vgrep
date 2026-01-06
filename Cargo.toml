@@ -97,8 +97,7 @@ parking_lot = "0.12"
 once_cell = "1.19"
 
 # Secure container runtime (from platform)
-# secure-container-runtime = { git = "https://github.com/PlatformNetwork/platform.git", rev = "f06e67da58de13887591c1c4223ec9a7f71ba5b6" }
-secure-container-runtime = { path = "../platform-repo/crates/secure-container-runtime" }
+secure-container-runtime = { git = "https://github.com/PlatformNetwork/platform.git", rev = "6da49e2" }
 
 # Compression for binary distribution and Docker builds
 flate2 = "1.0"

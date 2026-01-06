@@ -3632,6 +3632,7 @@ dependencies = [
 [[package]]
 name = "secure-container-runtime"
 version = "0.1.0"
+source = "git+https://github.com/PlatformNetwork/platform.git?rev=6da49e2#6da49e2550c12565b2fe347252dcd240f0043145"
 dependencies = [
  "anyhow",
  "base64",
