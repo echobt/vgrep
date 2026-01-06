@@ -107,11 +107,10 @@ async fn compile_in_container(
 ) -> Result<Vec<u8>> {
     // Ensure compiler image exists
     if !backend.image_exists(COMPILER_IMAGE).await.unwrap_or(false) {
-        info!("Pulling compiler image: {}", COMPILER_IMAGE);
-        backend
-            .pull_image(COMPILER_IMAGE)
+        info!("Compiler image not found, building: {}", COMPILER_IMAGE);
+        build_compiler_image(&backend)
             .await
-            .context("Failed to pull compiler image")?;
+            .context("Failed to build compiler image")?;
     }
 
     // Create container config
