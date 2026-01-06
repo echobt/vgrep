@@ -161,6 +161,22 @@ pub const EMBEDDED_MIGRATIONS: &[(&str, &str)] = &[
         "005_task_logs",
         include_str!("../migrations/005_task_logs.sql"),
     ),
+    (
+        "006_agent_binary",
+        include_str!("../migrations/006_agent_binary.sql"),
+    ),
+    (
+        "007_verbose_logs",
+        include_str!("../migrations/007_verbose_logs.sql"),
+    ),
+    (
+        "008_llm_usage",
+        include_str!("../migrations/008_llm_usage.sql"),
+    ),
+    (
+        "009_validator_assignment_status",
+        include_str!("../migrations/009_validator_assignment_status.sql"),
+    ),
 ];
 
 /// Run embedded migrations (when migrations dir is not available)
