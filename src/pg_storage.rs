@@ -637,6 +637,8 @@ impl PgStorage {
     /// Store an evaluation result
     pub async fn store_evaluation(&self, eval: &EvaluationRecord) -> Result<()> {
         let client = self.pool.get().await?;
+        // Column is REAL (f32), so cast f64 to f32 for PostgreSQL type matching
+        let cost_f32 = eval.total_cost_usd as f32;
         client.execute(
             "INSERT INTO evaluations (id, submission_id, agent_hash, miner_hotkey, score, tasks_passed, tasks_total, tasks_failed, total_cost_usd, execution_time_ms, task_results)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -651,7 +653,7 @@ impl PgStorage {
             &[
                 &eval.id, &eval.submission_id, &eval.agent_hash, &eval.miner_hotkey,
                 &eval.score, &eval.tasks_passed, &eval.tasks_total, &eval.tasks_failed,
-                &eval.total_cost_usd, &eval.execution_time_ms, &eval.task_results,
+                &cost_f32, &eval.execution_time_ms, &eval.task_results,
             ],
         ).await?;
 
@@ -947,12 +949,14 @@ impl PgStorage {
     pub async fn add_submission_cost(&self, agent_hash: &str, cost_usd: f64) -> Result<f64> {
         let client = self.pool.get().await?;
 
+        // Column is REAL (f32), so cast f64 to f32 for PostgreSQL type matching
+        let cost_f32 = cost_usd as f32;
         let row = client
             .query_one(
                 "UPDATE submissions SET total_cost_usd = total_cost_usd + $1 
              WHERE agent_hash = $2 
              RETURNING total_cost_usd, cost_limit_usd",
-                &[&cost_usd, &agent_hash],
+                &[&cost_f32, &agent_hash],
             )
             .await?;
 
