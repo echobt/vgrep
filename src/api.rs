@@ -2580,8 +2580,44 @@ pub async fn llm_chat_proxy(
             }))
         }
         Err(e) => {
+            // Check if it's an LlmApiError with preserved status code
+            if let Some(llm_err) = e.downcast_ref::<LlmApiError>() {
+                warn!(
+                    "LLM proxy: API error for agent {} - status={}, type={:?}, msg={}",
+                    &req.agent_hash[..12.min(req.agent_hash.len())],
+                    llm_err.status_code,
+                    llm_err.error_type,
+                    llm_err.message
+                );
+
+                // Log raw response at debug level for troubleshooting
+                if let Some(ref raw) = llm_err.raw_response {
+                    debug!("LLM raw error response: {}", raw);
+                }
+
+                // Map LLM provider status codes to appropriate HTTP responses
+                let http_status = map_llm_status_code(llm_err.status_code);
+
+                return Err((
+                    http_status,
+                    Json(LlmProxyResponse {
+                        success: false,
+                        content: None,
+                        model: None,
+                        usage: None,
+                        cost_usd: None,
+                        error: Some(format!(
+                            "{}: {}",
+                            llm_err.error_type.as_deref().unwrap_or("llm_error"),
+                            llm_err.message
+                        )),
+                    }),
+                ));
+            }
+
+            // Generic/network error
             error!(
-                "LLM proxy: failed for agent {}: {}",
+                "LLM proxy: request failed for agent {}: {}",
                 &req.agent_hash[..12.min(req.agent_hash.len())],
                 e
             );
@@ -2590,6 +2626,77 @@ pub async fn llm_chat_proxy(
                 Json(err_response(format!("LLM request failed: {}", e))),
             ))
         }
+    }
+}
+
+/// LLM API error with preserved HTTP status code from provider
+#[derive(Debug)]
+pub struct LlmApiError {
+    /// Original HTTP status code from provider (401, 402, 429, etc.)
+    pub status_code: u16,
+    /// Error message extracted from provider response
+    pub message: String,
+    /// Error type/code from provider (e.g., "invalid_api_key")
+    pub error_type: Option<String>,
+    /// Raw response body for debugging (truncated to 500 chars)
+    pub raw_response: Option<String>,
+}
+
+impl std::fmt::Display for LlmApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LLM API error ({}): {}", self.status_code, self.message)
+    }
+}
+
+impl std::error::Error for LlmApiError {}
+
+/// Parse error response from LLM providers (OpenRouter, OpenAI, Anthropic)
+fn parse_llm_error_response(response_text: &str) -> (String, Option<String>) {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(response_text) {
+        // OpenRouter/OpenAI format: {"error": {"message": "...", "type": "...", "code": "..."}}
+        if let Some(error_obj) = json.get("error") {
+            let message = error_obj
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown error")
+                .to_string();
+            let error_type = error_obj
+                .get("type")
+                .or_else(|| error_obj.get("code"))
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string());
+            return (message, error_type);
+        }
+
+        // Simple format: {"message": "..."}
+        if let Some(message) = json.get("message").and_then(|m| m.as_str()) {
+            return (message.to_string(), None);
+        }
+    }
+
+    // Fallback: return raw text (truncated)
+    let truncated = if response_text.len() > 200 {
+        format!("{}...", &response_text[..200])
+    } else {
+        response_text.to_string()
+    };
+    (truncated, None)
+}
+
+/// Map LLM provider HTTP status code to appropriate response status
+fn map_llm_status_code(status_code: u16) -> StatusCode {
+    match status_code {
+        400 => StatusCode::BAD_REQUEST,
+        401 => StatusCode::UNAUTHORIZED,
+        402 => StatusCode::PAYMENT_REQUIRED,
+        403 => StatusCode::FORBIDDEN,
+        404 => StatusCode::NOT_FOUND,
+        429 => StatusCode::TOO_MANY_REQUESTS,
+        500 => StatusCode::BAD_GATEWAY, // Provider internal error
+        502 => StatusCode::BAD_GATEWAY, // Provider upstream error
+        503 => StatusCode::SERVICE_UNAVAILABLE,
+        504 => StatusCode::GATEWAY_TIMEOUT,
+        _ => StatusCode::BAD_GATEWAY,
     }
 }
 
@@ -2671,7 +2778,27 @@ async fn make_llm_request(
     let response_text = response.text().await?;
 
     if !status.is_success() {
-        anyhow::bail!("LLM API error ({}): {}", status, response_text);
+        // Parse error response from provider
+        let (error_message, error_type) = parse_llm_error_response(&response_text);
+
+        warn!(
+            "LLM API error: status={}, type={:?}, message={}",
+            status.as_u16(),
+            error_type,
+            error_message
+        );
+
+        return Err(LlmApiError {
+            status_code: status.as_u16(),
+            message: error_message,
+            error_type,
+            raw_response: Some(if response_text.len() > 500 {
+                format!("{}...(truncated)", &response_text[..500])
+            } else {
+                response_text
+            }),
+        }
+        .into());
     }
 
     // Parse response
@@ -2839,8 +2966,44 @@ pub async fn llm_chat_proxy_stream(
     match stream_response {
         Ok(response) => Ok(response),
         Err(e) => {
+            // Check if it's an LlmApiError with preserved status code
+            if let Some(llm_err) = e.downcast_ref::<LlmApiError>() {
+                warn!(
+                    "LLM stream: API error for agent {} - status={}, type={:?}, msg={}",
+                    &req.agent_hash[..12.min(req.agent_hash.len())],
+                    llm_err.status_code,
+                    llm_err.error_type,
+                    llm_err.message
+                );
+
+                // Log raw response at debug level for troubleshooting
+                if let Some(ref raw) = llm_err.raw_response {
+                    debug!("LLM stream raw error response: {}", raw);
+                }
+
+                // Map LLM provider status codes to appropriate HTTP responses
+                let http_status = map_llm_status_code(llm_err.status_code);
+
+                return Err((
+                    http_status,
+                    Json(LlmProxyResponse {
+                        success: false,
+                        content: None,
+                        model: None,
+                        usage: None,
+                        cost_usd: None,
+                        error: Some(format!(
+                            "{}: {}",
+                            llm_err.error_type.as_deref().unwrap_or("llm_error"),
+                            llm_err.message
+                        )),
+                    }),
+                ));
+            }
+
+            // Generic/network error
             error!(
-                "LLM stream: failed for agent {}: {}",
+                "LLM stream: request failed for agent {}: {}",
                 &req.agent_hash[..12.min(req.agent_hash.len())],
                 e
             );
@@ -2921,7 +3084,28 @@ async fn make_llm_stream_request(
     if !response.status().is_success() {
         let status = response.status();
         let error_text = response.text().await.unwrap_or_default();
-        anyhow::bail!("LLM API error ({}): {}", status, error_text);
+
+        // Parse error response from provider
+        let (error_message, error_type) = parse_llm_error_response(&error_text);
+
+        warn!(
+            "LLM stream API error: status={}, type={:?}, message={}",
+            status.as_u16(),
+            error_type,
+            error_message
+        );
+
+        return Err(LlmApiError {
+            status_code: status.as_u16(),
+            message: error_message,
+            error_type,
+            raw_response: Some(if error_text.len() > 500 {
+                format!("{}...(truncated)", &error_text[..500])
+            } else {
+                error_text
+            }),
+        }
+        .into());
     }
 
     // Create a channel to send SSE events

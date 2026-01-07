@@ -949,23 +949,63 @@ pub async fn llm_local_proxy(
         })?;
 
     let status = response.status();
-    let body: serde_json::Value = response.json().await.map_err(|e| {
+
+    // Read body as text first to handle both JSON and non-JSON error responses
+    let body_text = response.text().await.map_err(|e| {
+        error!("LLM local proxy: failed to read response body: {}", e);
         (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({
                 "success": false,
-                "error": format!("Invalid response from central server: {}", e)
+                "error": format!("Failed to read response from central server: {}", e)
             })),
         )
     })?;
 
+    // Try to parse as JSON
+    let body: serde_json::Value = match serde_json::from_str(&body_text) {
+        Ok(json) => json,
+        Err(parse_err) => {
+            // Log the raw response for debugging (truncate if too long)
+            let truncated = if body_text.len() > 500 {
+                format!("{}...(truncated)", &body_text[..500])
+            } else {
+                body_text.clone()
+            };
+
+            warn!(
+                "LLM local proxy: central server returned non-JSON (status {}): {}",
+                status, truncated
+            );
+
+            // Preserve original status code, return structured error
+            let http_status =
+                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+
+            return Err((
+                http_status,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Invalid response from central server: {}", parse_err),
+                    "status_code": status.as_u16(),
+                    "raw_response": truncated
+                })),
+            ));
+        }
+    };
+
+    // Preserve the original HTTP status code
+    let http_status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+
     if status.is_success() {
         Ok(Json(body))
     } else {
-        Err((
-            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-            Json(body),
-        ))
+        // Log error response for debugging
+        warn!(
+            "LLM local proxy: central server returned error (status {}): {:?}",
+            status, body
+        );
+        Err((http_status, Json(body)))
     }
 }
 
