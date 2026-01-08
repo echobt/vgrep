@@ -143,8 +143,8 @@ pub use config::{
 };
 pub use container_backend::{
     create_backend as create_container_backend, is_development_mode, is_secure_mode,
-    ContainerBackend, ContainerHandle, DirectDockerBackend, ExecOutput, MountConfig, SandboxConfig,
-    SecureBrokerBackend, WsBrokerBackend, DEFAULT_BROKER_SOCKET, DEFAULT_BROKER_WS_URL,
+    ContainerBackend, ContainerHandle, ExecOutput, MountConfig, SandboxConfig, SecureBrokerBackend,
+    WsBrokerBackend, DEFAULT_BROKER_SOCKET, DEFAULT_BROKER_WS_URL,
 };
 pub use docker::{DockerConfig, DockerExecutor};
 pub use emission::{

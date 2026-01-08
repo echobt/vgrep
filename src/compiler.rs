@@ -756,7 +756,11 @@ if __name__ == "__main__":
     run(MyAgent())
 "#;
         let wrapped = create_agent_wrapper(code);
-        // Should not double-wrap
-        assert_eq!(wrapped, code);
+        // Should add HTTP mode setup but preserve existing entry point
+        assert!(wrapped.contains("FORCE_HTTP_SERVER"));
+        assert!(wrapped.contains("if __name__"));
+        assert!(wrapped.contains("run(MyAgent())"));
+        // Should not add auto-generated entry point since one exists
+        assert!(!wrapped.contains("Auto-generated entry point"));
     }
 }

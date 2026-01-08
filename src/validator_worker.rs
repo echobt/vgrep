@@ -832,10 +832,17 @@ impl ValidatorWorker {
                 )
             })?;
 
-        task_container
+        let container_endpoint = task_container
             .start()
             .await
             .context("Failed to start task container")?;
+
+        // Log container endpoint for HTTP communication
+        if let Some(ref endpoint) = container_endpoint {
+            info!("Task container endpoint: {}", endpoint);
+        } else {
+            debug!("Task container has no direct network endpoint, will use exec for HTTP");
+        }
 
         // Run setup script if present
         if let Some(setup_script) = &task.setup_script {
@@ -877,6 +884,7 @@ impl ValidatorWorker {
                 agent_hash,
                 task_id,
                 &llm_proxy_url,
+                container_endpoint.as_deref(),
             )
             .await
         {
@@ -970,6 +978,9 @@ impl ValidatorWorker {
     /// NEW ARCHITECTURE: The agent runs as an HTTP server inside the task container.
     /// Communication happens via HTTP POST /step requests instead of stdin/stdout.
     ///
+    /// If `container_endpoint` is provided (container name for Docker DNS resolution),
+    /// HTTP requests are made directly. Otherwise, falls back to using docker exec with bash /dev/tcp.
+    ///
     /// Returns (completed, accumulated_logs, steps_executed)
     #[allow(clippy::too_many_arguments)]
     async fn run_agent_loop(
@@ -981,6 +992,7 @@ impl ValidatorWorker {
         agent_hash: &str,
         task_id: &str,
         llm_proxy_url: &str,
+        container_endpoint: Option<&str>,
     ) -> Result<(bool, String, i32)> {
         const AGENT_PORT: u16 = 8765;
         const MAX_STEPS: usize = 500;
@@ -1035,7 +1047,20 @@ impl ValidatorWorker {
             .context("Failed to start agent HTTP server")?;
 
         // Step 3: Wait for agent HTTP server to be ready
-        info!("Waiting for agent HTTP server on port {}...", AGENT_PORT);
+        // Build the agent base URL - use direct HTTP if we have an endpoint (container name), otherwise use exec
+        let agent_base_url =
+            container_endpoint.map(|host| format!("http://{}:{}", host, AGENT_PORT));
+
+        info!(
+            "Waiting for agent HTTP server on port {} (mode: {})...",
+            AGENT_PORT,
+            if agent_base_url.is_some() {
+                "direct HTTP"
+            } else {
+                "exec"
+            }
+        );
+
         let mut agent_ready = false;
         let startup_start = std::time::Instant::now();
         let max_attempts = (AGENT_STARTUP_TIMEOUT_MS / 100) as usize;
@@ -1044,26 +1069,40 @@ impl ValidatorWorker {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             // Check health endpoint
-            let health_result = task_container
-                .exec(&[
-                    "curl",
-                    "-sf",
-                    "--max-time",
-                    "2",
-                    &format!("http://127.0.0.1:{}/health", AGENT_PORT),
-                ])
-                .await;
-
-            if let Ok(result) = health_result {
-                if result.success() && result.stdout.contains("ok") {
-                    agent_ready = true;
-                    info!(
-                        "Agent HTTP server ready after {}ms ({} attempts)",
-                        startup_start.elapsed().as_millis(),
-                        attempt
-                    );
-                    break;
+            let health_ok = if let Some(ref base_url) = agent_base_url {
+                // Direct HTTP request to container
+                match self
+                    .http_client
+                    .get(format!("{}/health", base_url))
+                    .timeout(Duration::from_secs(2))
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        resp.text().await.map(|t| t.contains("ok")).unwrap_or(false)
+                    }
+                    _ => false,
                 }
+            } else {
+                // Fallback: use exec with bash /dev/tcp (works without curl)
+                let health_cmd = format!(
+                    r#"exec 3<>/dev/tcp/127.0.0.1/{} && echo -e "GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n" >&3 && cat <&3 | tail -1"#,
+                    AGENT_PORT
+                );
+                match task_container.exec(&["bash", "-c", &health_cmd]).await {
+                    Ok(result) => result.success() && result.stdout.contains("ok"),
+                    Err(_) => false,
+                }
+            };
+
+            if health_ok {
+                agent_ready = true;
+                info!(
+                    "Agent HTTP server ready after {}ms ({} attempts)",
+                    startup_start.elapsed().as_millis(),
+                    attempt
+                );
+                break;
             }
 
             // Log progress every 2 seconds
@@ -1142,7 +1181,7 @@ impl ValidatorWorker {
             }
 
             // Build request JSON
-            let request = serde_json::json!({
+            let request_body = serde_json::json!({
                 "instruction": instruction,
                 "step": step,
                 "output": last_output,
@@ -1150,52 +1189,109 @@ impl ValidatorWorker {
                 "cwd": "/app"
             });
 
-            // Escape JSON for shell - replace single quotes
-            let request_json = request.to_string().replace('\'', "'\\''");
-
-            // POST /step via curl
-            let curl_cmd = format!(
-                "curl -sf --max-time 60 -X POST \
-                 -H 'Content-Type: application/json' \
-                 -d '{}' \
-                 http://127.0.0.1:{}/step",
-                request_json, AGENT_PORT
-            );
-
             debug!("Step {}: Sending request to agent...", step);
 
-            let step_result = tokio::time::timeout(
-                Duration::from_secs(65), // Slightly more than curl timeout
-                task_container.exec(&["sh", "-c", &curl_cmd]),
-            )
-            .await;
+            // Send step request - prefer direct HTTP if available
+            let response_text = if let Some(ref base_url) = agent_base_url {
+                // Direct HTTP request to container
+                let step_result = tokio::time::timeout(
+                    Duration::from_secs(65),
+                    self.http_client
+                        .post(format!("{}/step", base_url))
+                        .json(&request_body)
+                        .send(),
+                )
+                .await;
 
-            let response_text = match step_result {
-                Ok(Ok(result)) if result.success() => result.stdout,
-                Ok(Ok(result)) => {
-                    warn!(
-                        "Step {} curl failed: exit={}, stderr={}",
-                        step,
-                        result.exit_code,
-                        result.stderr.trim()
-                    );
-                    consecutive_empty_steps += 1;
-                    if consecutive_empty_steps >= MAX_CONSECUTIVE_EMPTY_STEPS {
-                        warn!(
-                            "Agent communication failed {} times, aborting",
-                            consecutive_empty_steps
-                        );
+                match step_result {
+                    Ok(Ok(resp)) if resp.status().is_success() => match resp.text().await {
+                        Ok(text) => text,
+                        Err(e) => {
+                            warn!("Step {} failed to read response: {}", step, e);
+                            consecutive_empty_steps += 1;
+                            if consecutive_empty_steps >= MAX_CONSECUTIVE_EMPTY_STEPS {
+                                warn!(
+                                    "Agent communication failed {} times, aborting",
+                                    consecutive_empty_steps
+                                );
+                                break;
+                            }
+                            continue;
+                        }
+                    },
+                    Ok(Ok(resp)) => {
+                        warn!("Step {} HTTP error: {}", step, resp.status());
+                        consecutive_empty_steps += 1;
+                        if consecutive_empty_steps >= MAX_CONSECUTIVE_EMPTY_STEPS {
+                            warn!(
+                                "Agent communication failed {} times, aborting",
+                                consecutive_empty_steps
+                            );
+                            break;
+                        }
+                        continue;
+                    }
+                    Ok(Err(e)) => {
+                        warn!("Step {} request error: {}", step, e);
+                        consecutive_empty_steps += 1;
+                        if consecutive_empty_steps >= MAX_CONSECUTIVE_EMPTY_STEPS {
+                            warn!(
+                                "Agent communication failed {} times, aborting",
+                                consecutive_empty_steps
+                            );
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(_) => {
+                        warn!("Step {} timeout (65s)", step);
                         break;
                     }
-                    continue;
                 }
-                Ok(Err(e)) => {
-                    warn!("Step {} exec error: {}", step, e);
-                    break;
-                }
-                Err(_) => {
-                    warn!("Step {} timeout (65s)", step);
-                    break;
+            } else {
+                // Fallback: exec with bash /dev/tcp
+                let request_json = request_body.to_string();
+                let escaped_json = request_json.replace('\\', "\\\\").replace('"', "\\\"");
+                let http_cmd = format!(
+                    r#"exec 3<>/dev/tcp/127.0.0.1/{port} && echo -e "POST /step HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {len}\r\n\r\n{body}" >&3 && cat <&3 | sed '1,/^\r$/d'"#,
+                    port = AGENT_PORT,
+                    len = request_json.len(),
+                    body = escaped_json
+                );
+
+                let step_result = tokio::time::timeout(
+                    Duration::from_secs(65),
+                    task_container.exec(&["bash", "-c", &http_cmd]),
+                )
+                .await;
+
+                match step_result {
+                    Ok(Ok(result)) if result.success() => result.stdout,
+                    Ok(Ok(result)) => {
+                        warn!(
+                            "Step {} exec failed: exit={}, stderr={}",
+                            step,
+                            result.exit_code,
+                            result.stderr.trim()
+                        );
+                        consecutive_empty_steps += 1;
+                        if consecutive_empty_steps >= MAX_CONSECUTIVE_EMPTY_STEPS {
+                            warn!(
+                                "Agent communication failed {} times, aborting",
+                                consecutive_empty_steps
+                            );
+                            break;
+                        }
+                        continue;
+                    }
+                    Ok(Err(e)) => {
+                        warn!("Step {} exec error: {}", step, e);
+                        break;
+                    }
+                    Err(_) => {
+                        warn!("Step {} timeout (65s)", step);
+                        break;
+                    }
                 }
             };
 
