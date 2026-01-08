@@ -637,6 +637,7 @@ impl ContainerBackend for SecureBrokerBackend {
                 })
                 .collect(),
             labels: HashMap::new(),
+            user: config.user,
         };
 
         let request = BrokerRequest::Create {
@@ -1020,6 +1021,7 @@ impl ContainerBackend for WsBrokerBackend {
                 })
                 .collect(),
             labels: HashMap::new(),
+            user: config.user,
         };
 
         let request = BrokerRequest::Create {
@@ -1483,6 +1485,7 @@ mod tests {
             },
             mounts: vec![],
             labels: HashMap::new(),
+            user: Some("root".to_string()),
         };
 
         let request = BrokerRequest::Create {
