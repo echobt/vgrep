@@ -507,11 +507,11 @@ pub async fn run_external_agent(
     agent_path: PathBuf,
     task_path: PathBuf,
     provider: Option<&str>,
-    _model: Option<&str>,
+    model: Option<&str>,
     api_key: Option<&str>,
     output_dir: Option<PathBuf>,
     timeout_multiplier: f64,
-    max_steps: u32,
+    _max_steps: u32,
 ) -> Result<()> {
     use term_challenge::bench::{run_binary_agent, BinaryAgentConfig};
 
@@ -562,10 +562,10 @@ pub async fn run_external_agent(
 
     // Configure agent
     let config = BinaryAgentConfig {
-        max_steps,
         timeout_secs: (task.agent_timeout() * timeout_multiplier) as u64,
         api_key: api_key.map(String::from),
         api_provider: provider.map(String::from),
+        api_model: model.map(String::from),
     };
 
     let start = std::time::Instant::now();

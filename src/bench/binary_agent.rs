@@ -203,19 +203,19 @@ pub struct BinaryAgentResult {
 /// Configuration for binary agent run
 #[derive(Debug, Clone)]
 pub struct BinaryAgentConfig {
-    pub max_steps: u32,
     pub timeout_secs: u64,
     pub api_key: Option<String>,
     pub api_provider: Option<String>,
+    pub api_model: Option<String>,
 }
 
 impl Default for BinaryAgentConfig {
     fn default() -> Self {
         Self {
-            max_steps: 200,
             timeout_secs: 300,
             api_key: None,
             api_provider: Some("openrouter".to_string()),
+            api_model: None,
         }
     }
 }
@@ -343,6 +343,9 @@ async fn run_agent_in_container(
     }
     if let Some(ref provider) = config.api_provider {
         env_vars.push(format!("LLM_PROVIDER={}", provider));
+    }
+    if let Some(ref model) = config.api_model {
+        env_vars.push(format!("LLM_MODEL={}", model));
     }
 
     let env_str = env_vars.join(" ");

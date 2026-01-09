@@ -218,9 +218,9 @@ class AgentHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     
     def log_message(self, format: str, *args) -> None:
-        """Override to use our logging format."""
+        """Override to use our logging format. Skip /health and /status to reduce noise."""
         msg = format % args if args else format
-        if '/health' not in msg:
+        if '/health' not in msg and '/status' not in msg:
             log(f"HTTP: {msg}")
     
     def do_POST(self) -> None:
