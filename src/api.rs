@@ -12,8 +12,8 @@ use crate::auth::{
 };
 use crate::pg_storage::{
     LeaderboardEntry, LlmUsageRecord, PgStorage, Submission, SubmissionInfo, TaskAssignment,
-    TaskLog, ValidatorJobInfo, DEFAULT_COST_LIMIT_USD, EPOCHS_BETWEEN_SUBMISSIONS,
-    MAX_COST_LIMIT_USD,
+    TaskLog, ValidatorJobInfo, DEFAULT_COST_LIMIT_USD, MAX_COST_LIMIT_USD,
+    SUBMISSION_COOLDOWN_SECS,
 };
 use axum::{
     body::Body,
@@ -234,16 +234,9 @@ pub async fn submit_agent(
         ));
     }
 
-    // Get current epoch
-    let epoch = state.storage.get_current_epoch().await.unwrap_or(0);
-
-    // Check rate limit: 1 agent per 3 epochs (skip in test mode)
+    // Check rate limit: 1 agent per 3.6 hours (skip in test mode)
     if !skip_auth {
-        match state
-            .storage
-            .can_miner_submit(&req.miner_hotkey, epoch)
-            .await
-        {
+        match state.storage.can_miner_submit(&req.miner_hotkey).await {
             Ok((can_submit, reason)) => {
                 if !can_submit {
                     warn!(
@@ -255,8 +248,8 @@ pub async fn submit_agent(
                         StatusCode::TOO_MANY_REQUESTS,
                         Json(err_response(reason.unwrap_or_else(|| {
                             format!(
-                                "Rate limit: 1 submission per {} epochs",
-                                EPOCHS_BETWEEN_SUBMISSIONS
+                                "Rate limit: 1 submission per {} hours",
+                                SUBMISSION_COOLDOWN_SECS / 3600
                             )
                         }))),
                     ));
@@ -274,6 +267,9 @@ pub async fn submit_agent(
             }
         }
     }
+
+    // Get current epoch (still needed for submission record)
+    let epoch = state.storage.get_current_epoch().await.unwrap_or(0);
 
     // Check agent name uniqueness (must not be taken by another miner)
     if let Some(ref name) = req.name {

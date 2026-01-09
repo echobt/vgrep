@@ -202,8 +202,8 @@ pub use evaluation_orchestrator::{
     AgentEvaluationResult, EvaluationOrchestrator, SourceCodeProvider,
 };
 pub use pg_storage::{
-    MinerSubmissionHistory, Submission, SubmissionInfo, DEFAULT_COST_LIMIT_USD,
-    EPOCHS_BETWEEN_SUBMISSIONS, MAX_COST_LIMIT_USD, MAX_VALIDATORS_PER_AGENT,
+    MinerSubmissionHistory, Submission, SubmissionInfo, DEFAULT_COST_LIMIT_USD, MAX_COST_LIMIT_USD,
+    MAX_VALIDATORS_PER_AGENT, SUBMISSION_COOLDOWN_SECS,
 };
 pub use platform_ws_client::PlatformWsClient;
 pub use subnet_control::{

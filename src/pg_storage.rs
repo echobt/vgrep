@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use tokio_postgres::NoTls;
 use tracing::{debug, error, info, warn};
 
-/// Minimum epochs between submissions for the same miner
-pub const EPOCHS_BETWEEN_SUBMISSIONS: i64 = 3;
+/// Minimum seconds between submissions for the same miner (3.6 hours)
+pub const SUBMISSION_COOLDOWN_SECS: i64 = 360 * 12 * 3; // 12960 seconds = 3.6 hours
 
 /// Maximum cost limit per validator in USD
 pub const MAX_COST_LIMIT_USD: f64 = 100.0;
@@ -830,29 +830,31 @@ impl PgStorage {
     // SUBMISSIONS (SENSITIVE - source code access controlled)
     // ========================================================================
 
-    /// Check if miner can submit (rate limit: 1 agent per 3 epochs)
-    pub async fn can_miner_submit(
-        &self,
-        miner_hotkey: &str,
-        current_epoch: i64,
-    ) -> Result<(bool, Option<String>)> {
+    /// Check if miner can submit (rate limit: 1 agent per 3.6 hours)
+    pub async fn can_miner_submit(&self, miner_hotkey: &str) -> Result<(bool, Option<String>)> {
         let client = self.pool.get().await?;
 
-        let row = client.query_opt(
-            "SELECT last_submission_epoch FROM miner_submission_history WHERE miner_hotkey = $1",
-            &[&miner_hotkey],
-        ).await?;
+        let row = client
+            .query_opt(
+                "SELECT EXTRACT(EPOCH FROM (NOW() - last_submission_at))::BIGINT as secs_since 
+             FROM miner_submission_history WHERE miner_hotkey = $1",
+                &[&miner_hotkey],
+            )
+            .await?;
 
         if let Some(row) = row {
-            let last_epoch: i64 = row.get(0);
-            let epochs_since = current_epoch - last_epoch;
+            let secs_since: Option<i64> = row.get(0);
 
-            if epochs_since < EPOCHS_BETWEEN_SUBMISSIONS {
-                let wait_epochs = EPOCHS_BETWEEN_SUBMISSIONS - epochs_since;
-                return Ok((false, Some(format!(
-                    "Rate limit: must wait {} more epoch(s) before submitting again (1 submission per {} epochs)",
-                    wait_epochs, EPOCHS_BETWEEN_SUBMISSIONS
-                ))));
+            if let Some(secs_since) = secs_since {
+                if secs_since < SUBMISSION_COOLDOWN_SECS {
+                    let wait_secs = SUBMISSION_COOLDOWN_SECS - secs_since;
+                    let wait_mins = wait_secs / 60;
+                    let cooldown_hours = SUBMISSION_COOLDOWN_SECS / 3600;
+                    return Ok((false, Some(format!(
+                        "Rate limit: must wait {} more minutes before submitting again (1 submission per {} hours)",
+                        wait_mins, cooldown_hours
+                    ))));
+                }
             }
         }
 
