@@ -108,12 +108,10 @@ class AgentContext:
         self,
         instruction: str,
         max_steps: int = 200,
-        timeout_secs: int = 300,
         cwd: str = "/app",
     ):
         self.instruction = instruction
         self.max_steps = max_steps
-        self.timeout_secs = timeout_secs
         self.cwd = cwd
         
         self._step = 0
@@ -143,11 +141,6 @@ class AgentContext:
         return time.time() - self._start_time
     
     @property
-    def remaining_secs(self) -> float:
-        """Seconds remaining before global timeout."""
-        return max(0, self.timeout_secs - self.elapsed_secs)
-    
-    @property
     def remaining_steps(self) -> int:
         """Steps remaining before max_steps limit."""
         return max(0, self.max_steps - self._step)
@@ -169,9 +162,6 @@ class AgentContext:
         
         if self._step >= self.max_steps:
             raise RuntimeError(f"Max steps ({self.max_steps}) exceeded")
-        
-        if self.elapsed_secs > self.timeout_secs:
-            raise RuntimeError(f"Global timeout ({self.timeout_secs}s) exceeded")
         
         self._step += 1
         effective_cwd = cwd or self.cwd
