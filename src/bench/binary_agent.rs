@@ -362,7 +362,7 @@ async fn run_agent_in_container(
         "setsid sh -c '{} /agent/agent > /agent/stdout.log 2> /agent/stderr.log' &",
         env_str
     );
-    env.exec(&["sh", "-c", &start_cmd]).await?;
+    env.exec_shell(&start_cmd).await?;
 
     // Wait for HTTP server to be ready
     let client = http_client();
