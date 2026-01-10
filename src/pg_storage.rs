@@ -107,23 +107,6 @@ CREATE INDEX IF NOT EXISTS idx_evaluations_agent ON evaluations(agent_hash);
 CREATE INDEX IF NOT EXISTS idx_evaluations_submission ON evaluations(submission_id);
 CREATE INDEX IF NOT EXISTS idx_evaluations_created ON evaluations(created_at DESC);
 
--- Leaderboard for this challenge (PUBLIC - no source code)
-CREATE TABLE IF NOT EXISTS leaderboard (
-    agent_hash TEXT PRIMARY KEY,
-    miner_hotkey TEXT NOT NULL,
-    name TEXT,
-    best_score REAL NOT NULL,
-    avg_score REAL NOT NULL,
-    evaluation_count INTEGER NOT NULL DEFAULT 0,
-    total_cost_usd REAL NOT NULL DEFAULT 0.0,
-    rank INTEGER,
-    first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_leaderboard_rank ON leaderboard(rank);
-CREATE INDEX IF NOT EXISTS idx_leaderboard_score ON leaderboard(best_score DESC);
-
 -- Pending evaluations (queued for processing by ALL validators)
 -- Each agent needs evaluation by ALL active validators
 CREATE TABLE IF NOT EXISTS pending_evaluations (
@@ -331,16 +314,29 @@ pub struct EvaluationRecord {
     pub created_at: i64,
 }
 
+/// Winner entry for weight calculation
+/// Calculated from submissions + validator_evaluations
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LeaderboardEntry {
+pub struct WinnerEntry {
     pub agent_hash: String,
     pub miner_hotkey: String,
     pub name: Option<String>,
-    pub best_score: f64,
-    pub avg_score: f64,
-    pub evaluation_count: i32,
-    pub total_cost_usd: f64,
-    pub rank: Option<i32>,
+    pub total_tasks_passed: i32,
+    pub num_validators: i32,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Agent entry for leaderboard display (from submissions + evaluations)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentLeaderboardEntry {
+    pub agent_hash: String,
+    pub miner_hotkey: String,
+    pub name: Option<String>,
+    pub total_tasks_passed: i32,
+    pub total_tasks: i32,
+    pub num_validators: i32,
+    pub manually_validated: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Pending evaluation - one per agent, ALL validators must evaluate
@@ -707,16 +703,6 @@ impl PgStorage {
             ],
         ).await?;
 
-        // Update leaderboard
-        self.update_leaderboard(
-            &eval.agent_hash,
-            &eval.miner_hotkey,
-            None, // No name from evaluation record
-            eval.score,
-            eval.total_cost_usd,
-        )
-        .await?;
-
         debug!(
             "Stored evaluation {} for agent {}",
             eval.id, eval.agent_hash
@@ -753,104 +739,124 @@ impl PgStorage {
     }
 
     // ========================================================================
-    // LEADERBOARD
+    // WEIGHT CALCULATION (from submissions + validator_evaluations)
     // ========================================================================
 
-    /// Update leaderboard entry (public for auto-evaluation)
-    /// Uses transaction to ensure atomic upsert + rank update
-    pub async fn update_leaderboard(
-        &self,
-        agent_hash: &str,
-        miner_hotkey: &str,
-        name: Option<&str>,
-        score: f64,
-        cost: f64,
-    ) -> Result<()> {
-        let mut client = self.pool.get().await?;
-        let transaction = client.transaction().await?;
+    /// Get the winning agent for weight calculation
+    /// Criteria:
+    /// - manually_validated = true
+    /// - minimum 2 validators have evaluated
+    /// - minimum 8 tasks passed per validator
+    /// - winner = most total tasks passed, ties broken by earliest submission
+    pub async fn get_eligible_winner(&self) -> Result<Option<WinnerEntry>> {
+        let client = self.pool.get().await?;
 
-        // Cast f64 to f32 for PostgreSQL REAL columns
-        let score_f32 = score as f32;
-        let cost_f32 = cost as f32;
+        let row = client
+            .query_opt(
+                "SELECT 
+                    s.agent_hash,
+                    s.miner_hotkey,
+                    s.name,
+                    s.created_at,
+                    SUM(ve.tasks_passed)::INTEGER as total_tasks_passed,
+                    COUNT(DISTINCT ve.validator_hotkey)::INTEGER as num_validators
+                FROM submissions s
+                JOIN validator_evaluations ve ON s.agent_hash = ve.agent_hash
+                WHERE s.manually_validated = true
+                  AND s.status NOT IN ('banned', 'failed')
+                GROUP BY s.agent_hash, s.miner_hotkey, s.name, s.created_at
+                HAVING COUNT(DISTINCT ve.validator_hotkey) >= 2
+                   AND MIN(ve.tasks_passed) >= 8
+                ORDER BY SUM(ve.tasks_passed) DESC, s.created_at ASC
+                LIMIT 1",
+                &[],
+            )
+            .await?;
 
-        // Upsert leaderboard entry
-        transaction.execute(
-            "INSERT INTO leaderboard (agent_hash, miner_hotkey, name, best_score, avg_score, evaluation_count, total_cost_usd)
-             VALUES ($1, $2, $3, $4, $4, 1, $5)
-             ON CONFLICT(agent_hash) DO UPDATE SET
-                name = COALESCE(EXCLUDED.name, leaderboard.name),
-                best_score = GREATEST(leaderboard.best_score, EXCLUDED.best_score),
-                avg_score = (leaderboard.avg_score * leaderboard.evaluation_count + EXCLUDED.avg_score) / (leaderboard.evaluation_count + 1),
-                evaluation_count = leaderboard.evaluation_count + 1,
-                total_cost_usd = leaderboard.total_cost_usd + EXCLUDED.total_cost_usd,
-                last_updated = NOW()",
-            &[&agent_hash, &miner_hotkey, &name, &score_f32, &cost_f32],
-        ).await?;
-
-        // Update ranks (atomically with the upsert)
-        transaction.execute(
-            "UPDATE leaderboard SET rank = subq.new_rank
-             FROM (SELECT agent_hash, ROW_NUMBER() OVER (ORDER BY best_score DESC) as new_rank FROM leaderboard) subq
-             WHERE leaderboard.agent_hash = subq.agent_hash",
-            &[],
-        ).await?;
-
-        transaction.commit().await?;
-
-        info!(
-            "Updated leaderboard for agent {}: score={:.2}%",
-            &agent_hash[..16.min(agent_hash.len())],
-            score * 100.0
-        );
-
-        Ok(())
+        Ok(row.map(|r| WinnerEntry {
+            agent_hash: r.get(0),
+            miner_hotkey: r.get(1),
+            name: r.get(2),
+            created_at: r.get(3),
+            total_tasks_passed: r.get(4),
+            num_validators: r.get(5),
+        }))
     }
 
-    /// Get leaderboard
-    pub async fn get_leaderboard(&self, limit: i64) -> Result<Vec<LeaderboardEntry>> {
+    /// Get leaderboard entries (all evaluated agents, showing validation status)
+    /// Sorted by total tasks passed descending, then by submission time
+    pub async fn get_agent_leaderboard(&self, limit: i64) -> Result<Vec<AgentLeaderboardEntry>> {
         let client = self.pool.get().await?;
-        let rows = client.query(
-            "SELECT agent_hash, miner_hotkey, name, best_score::FLOAT8, avg_score::FLOAT8, evaluation_count, total_cost_usd::FLOAT8, rank
-             FROM leaderboard ORDER BY rank ASC NULLS LAST LIMIT $1",
-            &[&limit],
-        ).await?;
+
+        let rows = client
+            .query(
+                "SELECT 
+                    s.agent_hash,
+                    s.miner_hotkey,
+                    s.name,
+                    s.created_at,
+                    s.manually_validated,
+                    COALESCE(SUM(ve.tasks_passed), 0)::INTEGER as total_tasks_passed,
+                    COALESCE(SUM(ve.tasks_total), 0)::INTEGER as total_tasks,
+                    COUNT(DISTINCT ve.validator_hotkey)::INTEGER as num_validators
+                FROM submissions s
+                LEFT JOIN validator_evaluations ve ON s.agent_hash = ve.agent_hash
+                WHERE s.status NOT IN ('banned', 'failed')
+                GROUP BY s.agent_hash, s.miner_hotkey, s.name, s.created_at, s.manually_validated
+                HAVING COUNT(DISTINCT ve.validator_hotkey) >= 1
+                ORDER BY SUM(ve.tasks_passed) DESC NULLS LAST, s.created_at ASC
+                LIMIT $1",
+                &[&limit],
+            )
+            .await?;
 
         Ok(rows
             .iter()
-            .map(|r| LeaderboardEntry {
+            .map(|r| AgentLeaderboardEntry {
                 agent_hash: r.get(0),
                 miner_hotkey: r.get(1),
                 name: r.get(2),
-                best_score: r.get(3),
-                avg_score: r.get(4),
-                evaluation_count: r.get(5),
-                total_cost_usd: r.get(6),
-                rank: r.get(7),
+                created_at: r.get(3),
+                manually_validated: r.get(4),
+                total_tasks_passed: r.get(5),
+                total_tasks: r.get(6),
+                num_validators: r.get(7),
             })
             .collect())
     }
 
-    /// Get leaderboard entry for an agent
-    pub async fn get_leaderboard_entry(
-        &self,
-        agent_hash: &str,
-    ) -> Result<Option<LeaderboardEntry>> {
+    /// Get a single agent's leaderboard entry by agent_hash
+    pub async fn get_agent_entry(&self, agent_hash: &str) -> Result<Option<AgentLeaderboardEntry>> {
         let client = self.pool.get().await?;
-        let row = client.query_opt(
-            "SELECT agent_hash, miner_hotkey, name, best_score::FLOAT8, avg_score::FLOAT8, evaluation_count, total_cost_usd::FLOAT8, rank
-             FROM leaderboard WHERE agent_hash = $1",
-            &[&agent_hash],
-        ).await?;
 
-        Ok(row.map(|r| LeaderboardEntry {
+        let row = client
+            .query_opt(
+                "SELECT 
+                    s.agent_hash,
+                    s.miner_hotkey,
+                    s.name,
+                    s.created_at,
+                    s.manually_validated,
+                    COALESCE(SUM(ve.tasks_passed), 0)::INTEGER as total_tasks_passed,
+                    COALESCE(SUM(ve.tasks_total), 0)::INTEGER as total_tasks,
+                    COUNT(DISTINCT ve.validator_hotkey)::INTEGER as num_validators
+                FROM submissions s
+                LEFT JOIN validator_evaluations ve ON s.agent_hash = ve.agent_hash
+                WHERE s.agent_hash = $1
+                GROUP BY s.agent_hash, s.miner_hotkey, s.name, s.created_at, s.manually_validated",
+                &[&agent_hash],
+            )
+            .await?;
+
+        Ok(row.map(|r| AgentLeaderboardEntry {
             agent_hash: r.get(0),
             miner_hotkey: r.get(1),
             name: r.get(2),
-            best_score: r.get(3),
-            avg_score: r.get(4),
-            evaluation_count: r.get(5),
-            total_cost_usd: r.get(6),
-            rank: r.get(7),
+            created_at: r.get(3),
+            manually_validated: r.get(4),
+            total_tasks_passed: r.get(5),
+            total_tasks: r.get(6),
+            num_validators: r.get(7),
         }))
     }
 
@@ -2019,9 +2025,15 @@ impl PgStorage {
             let status: String = row.get(0);
             if status == "completed" {
                 transaction.rollback().await?;
-                // Get the existing score from leaderboard
-                let lb = self.get_leaderboard_entry(agent_hash).await?;
-                return Ok(lb.map(|e| e.best_score).unwrap_or(0.0));
+                // Get the existing score from evaluations table
+                let client = self.pool.get().await?;
+                let score_row = client
+                    .query_opt(
+                        "SELECT score::FLOAT8 FROM evaluations WHERE agent_hash = $1 LIMIT 1",
+                        &[&agent_hash],
+                    )
+                    .await?;
+                return Ok(score_row.map(|r| r.get::<_, f64>(0)).unwrap_or(0.0));
             }
         }
 
@@ -2121,20 +2133,16 @@ impl PgStorage {
             )
             .await?;
 
+        // Update submissions status to completed
+        transaction
+            .execute(
+                "UPDATE submissions SET status = 'completed' WHERE agent_hash = $1",
+                &[&agent_hash],
+            )
+            .await?;
+
         // Commit transaction
         transaction.commit().await?;
-
-        // Update leaderboard (separate operation, can fail independently)
-        if let Err(e) = self
-            .update_leaderboard(agent_hash, &miner_hotkey, None, final_score, avg_cost)
-            .await
-        {
-            warn!(
-                "Failed to update leaderboard for {}: {:?}",
-                &agent_hash[..16],
-                e
-            );
-        }
 
         info!(
             "Consensus reached for agent {}: score={:.4} from {} validators",

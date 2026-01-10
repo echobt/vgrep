@@ -226,35 +226,48 @@ pub struct WeightEntry {
 }
 
 /// GET /get_weights - Deterministic weight calculation
+/// Winner-takes-all: The best eligible agent gets 100% of the weight (1.0)
+/// Eligibility requirements:
+/// - manually_validated = true
+/// - At least 2 validators have evaluated
+/// - At least 8 tasks passed per validator
 pub async fn get_weights(
     State(state): State<Arc<ChallengeServerState>>,
     Query(query): Query<GetWeightsQuery>,
 ) -> Result<Json<GetWeightsResponse>, (StatusCode, String)> {
-    let snapshot = state
-        .platform_client
-        .get_snapshot(query.epoch)
+    let epoch = query.epoch.unwrap_or(0);
+
+    // Get PostgreSQL storage (required for server mode)
+    let pg = state.pg_storage.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "PostgreSQL storage not available".to_string(),
+        )
+    })?;
+
+    // Get the eligible winner directly from our database
+    let winner = pg
+        .get_eligible_winner()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let epoch = snapshot.epoch;
-    let mut weights = Vec::new();
-    let total_score: f64 = snapshot
-        .leaderboard
-        .iter()
-        .map(|e| e.consensus_score.max(0.0))
-        .sum();
-
-    if total_score > 0.0 {
-        for entry in &snapshot.leaderboard {
-            if entry.consensus_score > 0.0 {
-                let weight = (entry.consensus_score / total_score) * 0.9;
-                weights.push(WeightEntry {
-                    hotkey: entry.miner_hotkey.clone(),
-                    weight,
-                });
-            }
-        }
-    }
+    let weights = if let Some(winner) = winner {
+        info!(
+            "Weight winner for epoch {}: {} (hotkey: {}, tasks_passed: {}, validators: {})",
+            epoch,
+            winner.name.as_deref().unwrap_or(&winner.agent_hash[..16]),
+            &winner.miner_hotkey[..16],
+            winner.total_tasks_passed,
+            winner.num_validators
+        );
+        vec![WeightEntry {
+            hotkey: winner.miner_hotkey,
+            weight: 1.0,
+        }]
+    } else {
+        info!("No eligible winner for epoch {} - no agents meet criteria (validated, >=2 validators, >=8 tasks/validator)", epoch);
+        vec![]
+    };
 
     let total_weight: f64 = weights.iter().map(|w| w.weight).sum();
     info!(
@@ -763,47 +776,32 @@ pub async fn get_leaderboard(
 ) -> Result<Json<LeaderboardResponse>, (StatusCode, String)> {
     let limit = query.limit.unwrap_or(100);
 
-    // Use PostgreSQL if in server mode, otherwise fetch from platform-server API
-    let entries: Vec<LeaderboardEntryResponse> = if let Some(pg) = &state.pg_storage {
-        // Server mode: read from local PostgreSQL
-        let lb = pg
-            .get_leaderboard(limit as i64)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Get PostgreSQL storage (required for server mode)
+    let pg = state.pg_storage.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "PostgreSQL storage not available".to_string(),
+        )
+    })?;
 
-        lb.iter()
-            .map(|e| LeaderboardEntryResponse {
-                rank: e.rank.unwrap_or(0) as u32,
-                agent_hash: e.agent_hash.clone(),
-                miner_hotkey: e.miner_hotkey.clone(),
-                name: e.name.clone(),
-                consensus_score: e.best_score,
-                evaluation_count: e.evaluation_count as u32,
-            })
-            .collect()
-    } else {
-        // Validator mode: fetch from platform-server via snapshot
-        let snapshot = state
-            .platform_client
-            .get_snapshot(None)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Get leaderboard from PostgreSQL storage
+    let lb = pg
+        .get_agent_leaderboard(limit as i64)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        snapshot
-            .leaderboard
-            .iter()
-            .take(limit)
-            .enumerate()
-            .map(|(i, e)| LeaderboardEntryResponse {
-                rank: (i + 1) as u32,
-                agent_hash: e.agent_hash.clone(),
-                miner_hotkey: e.miner_hotkey.clone(),
-                name: e.name.clone(),
-                consensus_score: e.consensus_score,
-                evaluation_count: e.evaluation_count,
-            })
-            .collect()
-    };
+    let entries: Vec<LeaderboardEntryResponse> = lb
+        .iter()
+        .enumerate()
+        .map(|(i, e)| LeaderboardEntryResponse {
+            rank: (i + 1) as u32,
+            agent_hash: e.agent_hash.clone(),
+            miner_hotkey: e.miner_hotkey.clone(),
+            name: e.name.clone(),
+            consensus_score: e.total_tasks_passed as f64, // Use tasks_passed as score
+            evaluation_count: e.num_validators as u32,
+        })
+        .collect();
 
     let total_count = entries.len();
 

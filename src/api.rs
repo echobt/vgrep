@@ -12,7 +12,7 @@ use crate::auth::{
 };
 use crate::package_validator::PackageValidator;
 use crate::pg_storage::{
-    LeaderboardEntry, LlmUsageRecord, PgStorage, Submission, SubmissionInfo, TaskAssignment,
+    AgentLeaderboardEntry, LlmUsageRecord, PgStorage, Submission, SubmissionInfo, TaskAssignment,
     TaskLog, ValidatorJobInfo, DEFAULT_COST_LIMIT_USD, MAX_COST_LIMIT_USD,
     SUBMISSION_COOLDOWN_SECS,
 };
@@ -582,13 +582,16 @@ pub struct LeaderboardEntryResponse {
     pub agent_hash: String,
     pub miner_hotkey: String,
     pub name: Option<String>,
-    pub best_score: f64,
-    pub evaluation_count: i32,
+    pub tasks_passed: i32,
+    pub tasks_total: i32,
+    pub num_validators: i32,
+    pub manually_validated: bool,
 }
 
 /// GET /api/v1/leaderboard - Get public leaderboard
 ///
 /// No authentication required. Does NOT include source code.
+/// Returns all evaluated agents sorted by tasks_passed, includes manual validation status.
 pub async fn get_leaderboard(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<LeaderboardQuery>,
@@ -597,19 +600,22 @@ pub async fn get_leaderboard(
 
     let entries = state
         .storage
-        .get_leaderboard(limit)
+        .get_agent_leaderboard(limit)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let response_entries: Vec<LeaderboardEntryResponse> = entries
         .into_iter()
-        .map(|e| LeaderboardEntryResponse {
-            rank: e.rank.unwrap_or(0),
+        .enumerate()
+        .map(|(i, e)| LeaderboardEntryResponse {
+            rank: (i + 1) as i32,
             agent_hash: e.agent_hash,
             miner_hotkey: e.miner_hotkey,
             name: e.name,
-            best_score: e.best_score,
-            evaluation_count: e.evaluation_count,
+            tasks_passed: e.total_tasks_passed,
+            tasks_total: e.total_tasks,
+            num_validators: e.num_validators,
+            manually_validated: e.manually_validated,
         })
         .collect();
 
@@ -639,24 +645,31 @@ pub struct AgentStatusResponse {
 /// GET /api/v1/leaderboard/:agent_hash - Get agent details
 ///
 /// No authentication required. Does NOT include source code.
-/// Returns both evaluated agents (from leaderboard) and pending agents (from submissions).
+/// Returns both evaluated agents and pending agents.
 pub async fn get_agent_details(
     State(state): State<Arc<ApiState>>,
     Path(agent_hash): Path<String>,
 ) -> Result<Json<AgentStatusResponse>, (StatusCode, String)> {
-    // First try leaderboard (evaluated agents)
-    if let Ok(Some(entry)) = state.storage.get_leaderboard_entry(&agent_hash).await {
+    // First try to get agent entry (evaluated or not)
+    if let Ok(Some(entry)) = state.storage.get_agent_entry(&agent_hash).await {
+        let status = if entry.num_validators >= 2 {
+            "completed".to_string()
+        } else if entry.num_validators >= 1 {
+            "evaluating".to_string()
+        } else {
+            "pending".to_string()
+        };
         return Ok(Json(AgentStatusResponse {
             agent_hash: entry.agent_hash,
             miner_hotkey: entry.miner_hotkey,
             name: entry.name,
-            status: "completed".to_string(),
-            rank: entry.rank,
-            best_score: Some(entry.best_score),
-            evaluation_count: entry.evaluation_count,
-            validators_completed: entry.evaluation_count,
-            total_validators: entry.evaluation_count,
-            submitted_at: None,
+            status,
+            rank: None, // Rank is computed dynamically in leaderboard
+            best_score: Some(entry.total_tasks_passed as f64),
+            evaluation_count: entry.num_validators,
+            validators_completed: entry.num_validators,
+            total_validators: 2, // Required validators
+            submitted_at: Some(entry.created_at.to_rfc3339()),
         }));
     }
 

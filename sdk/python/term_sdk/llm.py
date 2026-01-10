@@ -418,8 +418,19 @@ class LLM:
         tools: Optional[List[Tool]] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> LLMResponse:
-        """Chat (non-streaming)."""
+        """Chat (non-streaming).
+        
+        Args:
+            messages: List of message dicts with 'role' and 'content'
+            model: Model name (uses default if not specified)
+            tools: Optional list of tools for function calling
+            temperature: Sampling temperature
+            max_tokens: Max tokens in response
+            extra_body: Extra parameters to include in the request body
+                       (e.g., {"thinking": {"type": "enabled"}})
+        """
         model = self._get_model(model)
         temp = temperature if temperature is not None else self.temperature
         tokens = max_tokens if max_tokens is not None else self.max_tokens
@@ -459,6 +470,10 @@ class LLM:
             if tools:
                 payload["tools"] = [t.to_dict() for t in tools]
                 payload["tool_choice"] = "auto"
+            
+            # Add extra_body parameters (e.g., thinking, top_p, etc.)
+            if extra_body:
+                payload.update(extra_body)
             
             headers = {
                 "Authorization": f"Bearer {self._api_key}",
