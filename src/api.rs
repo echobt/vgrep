@@ -591,7 +591,7 @@ pub struct LeaderboardEntryResponse {
 /// GET /api/v1/leaderboard - Get public leaderboard
 ///
 /// No authentication required. Does NOT include source code.
-/// Returns all evaluated agents sorted by tasks_passed, includes manual validation status.
+/// Returns only fully evaluated agents (status='completed') sorted by tasks_passed.
 pub async fn get_leaderboard(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<LeaderboardQuery>,

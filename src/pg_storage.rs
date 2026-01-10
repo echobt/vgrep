@@ -783,7 +783,7 @@ impl PgStorage {
         }))
     }
 
-    /// Get leaderboard entries (all evaluated agents, showing validation status)
+    /// Get leaderboard entries (only fully evaluated agents with status='completed')
     /// Sorted by total tasks passed descending, then by submission time
     pub async fn get_agent_leaderboard(&self, limit: i64) -> Result<Vec<AgentLeaderboardEntry>> {
         let client = self.pool.get().await?;
@@ -801,7 +801,7 @@ impl PgStorage {
                     COUNT(DISTINCT ve.validator_hotkey)::INTEGER as num_validators
                 FROM submissions s
                 LEFT JOIN validator_evaluations ve ON s.agent_hash = ve.agent_hash
-                WHERE s.status NOT IN ('banned', 'failed')
+                WHERE s.status = 'completed'
                 GROUP BY s.agent_hash, s.miner_hotkey, s.name, s.created_at, s.manually_validated
                 HAVING COUNT(DISTINCT ve.validator_hotkey) >= 1
                 ORDER BY SUM(ve.tasks_passed) DESC NULLS LAST, s.created_at ASC
