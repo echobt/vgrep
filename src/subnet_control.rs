@@ -26,10 +26,10 @@ use tracing::{debug, error, info, warn};
 
 /// Maximum agents evaluating concurrently
 pub const MAX_CONCURRENT_AGENTS: usize = 4;
-/// Maximum tasks running concurrently (across all agents)
-pub const MAX_CONCURRENT_TASKS: usize = 16;
-/// Maximum tasks per agent concurrently
-pub const MAX_TASKS_PER_AGENT: usize = 4;
+/// Maximum tasks running concurrently per validator (3 validators × 2 tasks = 6 max per agent)
+pub const MAX_CONCURRENT_TASKS: usize = 8;
+/// Maximum tasks per agent concurrently (2 tasks per validator)
+pub const MAX_TASKS_PER_AGENT: usize = 2;
 
 /// Subnet control state - persisted to chain storage
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -52,6 +52,8 @@ pub enum SubnetCommand {
     Approve(ReviewActionArgs),
     /// Reject an agent permanently
     Reject(ReviewActionArgs),
+    /// Cancel an agent evaluation (owner only)
+    Cancel(CancelAgentArgs),
 }
 
 #[derive(Debug, Args)]
@@ -99,6 +101,25 @@ pub struct ReviewActionArgs {
     pub sudo_key: Option<String>,
 }
 
+#[derive(Debug, Args)]
+pub struct CancelAgentArgs {
+    /// Agent hash to cancel
+    #[arg(long)]
+    pub agent_hash: String,
+
+    /// Reason for cancellation
+    #[arg(long)]
+    pub reason: Option<String>,
+
+    /// Owner secret seed (32 bytes hex, will prompt if not provided)
+    #[arg(long, env = "OWNER_SEED", hide_env_values = true)]
+    pub seed: Option<String>,
+
+    /// Owner hotkey (SS58 address) - required
+    #[arg(long, required = true)]
+    pub hotkey: String,
+}
+
 #[derive(Debug, Serialize)]
 struct SubnetControlRequest {
     enabled: bool,
@@ -135,6 +156,7 @@ pub async fn run(args: SubnetArgs) -> Result<()> {
         SubnetCommand::ReviewCode(code_args) => view_review_code(rpc_url, code_args).await,
         SubnetCommand::Approve(action_args) => approve_agent_review(rpc_url, action_args).await,
         SubnetCommand::Reject(action_args) => reject_agent_review(rpc_url, action_args).await,
+        SubnetCommand::Cancel(cancel_args) => cancel_agent(rpc_url, cancel_args).await,
     }
 }
 
@@ -683,6 +705,76 @@ async fn reject_agent_review(rpc_url: &str, args: ReviewActionArgs) -> Result<()
     } else {
         println!(
             "\n{} Failed to reject: {}",
+            CROSS,
+            style(result["error"].as_str().unwrap_or("Unknown error")).red()
+        );
+        if !status_code.is_success() {
+            println!("   HTTP Status: {}", status_code);
+        }
+    }
+
+    println!();
+    Ok(())
+}
+
+/// Cancel an agent evaluation
+async fn cancel_agent(rpc_url: &str, args: CancelAgentArgs) -> Result<()> {
+    println!("\n{} Cancelling agent evaluation...\n", INFO);
+
+    // Get owner credentials
+    let auth = OwnerAuthArgs {
+        seed: args.seed,
+        hotkey: args.hotkey,
+    };
+    let (hotkey, signing_key) = get_owner_credentials(auth)?;
+
+    // Confirm action
+    let confirm = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!(
+            "Are you sure you want to CANCEL agent {}?",
+            style(&args.agent_hash[..16.min(args.agent_hash.len())]).red()
+        ))
+        .default(false)
+        .interact()?;
+
+    if !confirm {
+        println!("\n{} Operation cancelled", CROSS);
+        return Ok(());
+    }
+
+    // Sign the request
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let message = format!("sudo:cancel:{}:{}", timestamp, args.agent_hash);
+    let signature = signing_key.sign(message.as_bytes());
+    let signature_hex = hex::encode(signature.0);
+
+    let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
+
+    let url = format!("{}/api/v1/sudo/cancel/{}", rpc_url, args.agent_hash);
+    let body = serde_json::json!({
+        "owner_hotkey": hotkey,
+        "signature": signature_hex,
+        "timestamp": timestamp,
+        "reason": args.reason
+    });
+
+    let response = client.post(&url).json(&body).send().await?;
+
+    let status_code = response.status();
+    let result: serde_json::Value = response.json().await?;
+
+    if result["success"].as_bool().unwrap_or(false) {
+        println!(
+            "\n{} Agent {} cancelled successfully!",
+            CHECK,
+            style(&args.agent_hash[..16.min(args.agent_hash.len())]).green()
+        );
+        println!("   The agent has been removed from evaluation queue.");
+    } else {
+        println!(
+            "\n{} Failed to cancel: {}",
             CROSS,
             style(result["error"].as_str().unwrap_or("Unknown error")).red()
         );

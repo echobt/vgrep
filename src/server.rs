@@ -1001,7 +1001,8 @@ pub async fn llm_local_proxy(
                     "success": false,
                     "error": format!("Invalid response from central server: {}", parse_err),
                     "status_code": status.as_u16(),
-                    "raw_response": truncated
+                    "raw_response": truncated,
+                    "hint": "Check if central server is running and accessible"
                 })),
             ));
         }
@@ -1566,6 +1567,7 @@ pub async fn run_server_with_mode(
                 "/sudo/set_status/:agent_hash",
                 post(api::sudo_set_agent_status),
             )
+            .route("/sudo/cancel/:agent_hash", post(api::sudo_cancel_agent))
             // Public endpoints (no authentication required)
             .route("/pending", get(api::get_pending_submissions))
             .route("/assignments", get(api::get_all_assignments))

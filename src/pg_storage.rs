@@ -25,8 +25,8 @@ pub const MAX_COST_LIMIT_USD: f64 = 100.0;
 /// Default cost limit per validator in USD
 pub const DEFAULT_COST_LIMIT_USD: f64 = 80.0;
 
-/// Maximum number of validators per agent evaluation
-pub const MAX_VALIDATORS_PER_AGENT: i32 = 2;
+/// Maximum number of validators per agent evaluation (30 tasks / 10 per validator = 3)
+pub const MAX_VALIDATORS_PER_AGENT: i32 = 3;
 
 /// Maximum log size per field (1 MB)
 const MAX_LOG_SIZE: usize = 4 * 1024 * 1024; // 4MB
@@ -3669,6 +3669,99 @@ impl PgStorage {
         }
 
         info!("SUDO set agent {} status to {}", agent_hash, status);
+        Ok(())
+    }
+
+    /// Cancel an agent evaluation (owner only)
+    /// This will:
+    /// 1. Set submissions.status = 'cancelled'
+    /// 2. Remove from pending_evaluations
+    /// 3. Remove validator_assignments
+    /// 4. Log the cancellation in cancellation_history
+    pub async fn cancel_agent(
+        &self,
+        agent_hash: &str,
+        cancelled_by: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        let client = self.pool.get().await?;
+
+        // Get current status and miner_hotkey for audit
+        let submission_row = client
+            .query_opt(
+                "SELECT miner_hotkey, status FROM submissions WHERE agent_hash = $1",
+                &[&agent_hash],
+            )
+            .await?;
+
+        let (miner_hotkey, previous_status) = match submission_row {
+            Some(row) => {
+                let miner: String = row.get(0);
+                let status: String = row.get(1);
+                (miner, status)
+            }
+            None => {
+                return Err(anyhow::anyhow!("Agent not found: {}", agent_hash));
+            }
+        };
+
+        // Don't cancel already completed agents
+        if previous_status == "completed" || previous_status == "evaluated" {
+            return Err(anyhow::anyhow!(
+                "Cannot cancel agent with status '{}' - already completed",
+                previous_status
+            ));
+        }
+
+        // 1. Update submissions status
+        client
+            .execute(
+                "UPDATE submissions SET status = 'cancelled' WHERE agent_hash = $1",
+                &[&agent_hash],
+            )
+            .await?;
+
+        // 2. Remove from pending_evaluations
+        client
+            .execute(
+                "DELETE FROM pending_evaluations WHERE agent_hash = $1",
+                &[&agent_hash],
+            )
+            .await?;
+
+        // 3. Remove validator_assignments
+        client
+            .execute(
+                "DELETE FROM validator_assignments WHERE agent_hash = $1",
+                &[&agent_hash],
+            )
+            .await?;
+
+        // 4. Log cancellation in history table
+        let history_id = uuid::Uuid::new_v4().to_string();
+        client
+            .execute(
+                "INSERT INTO cancellation_history (id, agent_hash, miner_hotkey, cancelled_by, reason, previous_status)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &[
+                    &history_id,
+                    &agent_hash,
+                    &miner_hotkey,
+                    &cancelled_by,
+                    &reason.unwrap_or("No reason provided"),
+                    &previous_status,
+                ],
+            )
+            .await?;
+
+        info!(
+            "CANCELLED agent {} by {} (was: {}, reason: {:?})",
+            &agent_hash[..16.min(agent_hash.len())],
+            &cancelled_by[..16.min(cancelled_by.len())],
+            previous_status,
+            reason
+        );
+
         Ok(())
     }
 

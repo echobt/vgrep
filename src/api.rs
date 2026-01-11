@@ -3426,6 +3426,62 @@ pub async fn sudo_set_agent_status(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SudoCancelRequest {
+    pub owner_hotkey: String,
+    pub signature: String,
+    pub timestamp: i64,
+    pub reason: Option<String>,
+}
+
+/// POST /api/v1/sudo/cancel/:agent_hash - Cancel an agent evaluation
+///
+/// Cancels an in-progress or pending agent evaluation.
+/// This will:
+/// - Set status to 'cancelled'
+/// - Remove from pending_evaluations
+/// - Remove validator_assignments
+/// - Log the cancellation for audit
+pub async fn sudo_cancel_agent(
+    State(state): State<Arc<ApiState>>,
+    Path(agent_hash): Path<String>,
+    Json(req): Json<SudoCancelRequest>,
+) -> Result<Json<SudoResponse>, (StatusCode, Json<SudoResponse>)> {
+    // Create a SudoRequest for verification
+    let sudo_req = SudoRequest {
+        owner_hotkey: req.owner_hotkey.clone(),
+        signature: req.signature.clone(),
+        timestamp: req.timestamp,
+    };
+    verify_sudo_request(&sudo_req, "cancel", &agent_hash)?;
+
+    state
+        .storage
+        .cancel_agent(&agent_hash, &req.owner_hotkey, req.reason.as_deref())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(SudoResponse {
+                    success: false,
+                    message: String::new(),
+                    error: Some(e.to_string()),
+                }),
+            )
+        })?;
+
+    info!(
+        "SUDO: Cancelled agent {} by {} (reason: {:?})",
+        agent_hash, req.owner_hotkey, req.reason
+    );
+
+    Ok(Json(SudoResponse {
+        success: true,
+        message: format!("Agent {} cancelled", agent_hash),
+        error: None,
+    }))
+}
+
 // ============================================================================
 // TASK OBSERVABILITY ENDPOINTS
 // ============================================================================

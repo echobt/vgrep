@@ -26,6 +26,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// Number of tasks to evaluate each agent on
 const TASKS_PER_EVALUATION: usize = 30;
 
+/// Number of tasks per validator (30 total / 3 validators = 10)
+const TASKS_PER_VALIDATOR: usize = 10;
+
 /// Maximum concurrent task containers (prevents resource exhaustion)
 const MAX_CONCURRENT_TASK_CONTAINERS: usize = 5;
 
@@ -204,9 +207,34 @@ impl ValidatorWorker {
         Ok(tasks)
     }
 
+    /// Check broker WSS connectivity before starting validation
+    async fn check_broker_connectivity(&self) -> bool {
+        info!("Checking broker WSS connectivity...");
+
+        // Try to get broker URL from container backend
+        let broker_url = std::env::var("BROKER_WSS_URL")
+            .unwrap_or_else(|_| "wss://broker.platform.network".to_string());
+
+        // Simple connectivity check - try to establish connection
+        match tokio_tungstenite::connect_async(&broker_url).await {
+            Ok((_, _)) => {
+                info!("Broker WSS connectivity OK: {}", broker_url);
+                true
+            }
+            Err(e) => {
+                warn!("Broker WSS connectivity FAILED: {} - {}", broker_url, e);
+                warn!("Validation may fail if broker is required for container execution");
+                false
+            }
+        }
+    }
+
     /// Main entry point - runs forever
     pub async fn run(&self, mut event_rx: mpsc::Receiver<ValidatorEvent>) {
         info!("Validator worker starting...");
+
+        // 0. Check broker connectivity (non-blocking warning)
+        self.check_broker_connectivity().await;
 
         // 1. Recover pending assignments on startup
         self.recover_pending_assignments().await;

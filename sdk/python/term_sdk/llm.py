@@ -519,10 +519,17 @@ class LLM:
                         used=used
                     )
                 
+                # Enhanced error message for proxy errors
+                raw_text = response.text[:500] if response.text else "empty response"
                 raise LLMError(
                     code="proxy_error",
-                    message=str(error_msg),
-                    details={"status_code": response.status_code, "proxy_url": self._api_url}
+                    message=f"Invalid response from central server: {error_msg}",
+                    details={
+                        "status_code": response.status_code,
+                        "proxy_url": self._api_url,
+                        "raw_response": raw_text,
+                        "hint": "Check if central server is running and accessible"
+                    }
                 )
             self._handle_api_error(response, model)
         
@@ -726,10 +733,17 @@ class LLM:
                             used=used
                         )
                     
+                    # Enhanced error message for proxy errors
+                    raw_text = response.text[:500] if response.text else "empty response"
                     raise LLMError(
                         code="proxy_error",
-                        message=str(error_msg),
-                        details={"status_code": response.status_code, "proxy_url": stream_url}
+                        message=f"Invalid response from central server: {error_msg}",
+                        details={
+                            "status_code": response.status_code,
+                            "proxy_url": stream_url,
+                            "raw_response": raw_text,
+                            "hint": "Check if central server is running and accessible"
+                        }
                     )
                 
                 for line in response.iter_lines():
