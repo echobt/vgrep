@@ -540,6 +540,65 @@ pub struct ReassignmentHistory {
     pub created_at: i64,
 }
 
+/// Detailed agent status with all phases and timings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetailedAgentStatus {
+    pub agent_hash: String,
+    pub miner_hotkey: String,
+    pub name: Option<String>,
+
+    // Overall status
+    pub status: String, // "pending", "compiling", "evaluating", "completed", "banned", "failed"
+    pub submitted_at: i64,
+
+    // Compilation phase
+    pub compile_status: String, // "pending", "compiling", "success", "failed"
+    pub compile_started_at: Option<i64>,
+    pub compile_completed_at: Option<i64>,
+    pub compile_duration_secs: Option<i64>,
+    pub compile_error: Option<String>,
+
+    // Agent initialization phase (container startup)
+    pub agent_init_started_at: Option<i64>,
+    pub agent_init_completed_at: Option<i64>,
+    pub agent_init_duration_secs: Option<i64>,
+    pub agent_running: bool,
+    pub agent_run_duration_secs: Option<i64>,
+
+    // Evaluation phase
+    pub evaluation_status: String, // "pending", "initializing", "running", "completed"
+    pub evaluation_started_at: Option<i64>,
+    pub evaluation_completed_at: Option<i64>,
+    pub evaluation_duration_secs: Option<i64>,
+
+    // Task progress
+    pub total_tasks: i32,
+    pub completed_tasks: i32,
+    pub passed_tasks: i32,
+    pub failed_tasks: i32,
+
+    // Validator info
+    pub validators_assigned: i32,
+    pub validators_completed: i32,
+    pub validator_details: Vec<ValidatorProgress>,
+
+    // Cost tracking
+    pub total_cost_usd: f64,
+}
+
+/// Progress for a single validator
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorProgress {
+    pub validator_hotkey: String,
+    pub status: String, // "assigned", "started", "completed"
+    pub tasks_total: i32,
+    pub tasks_completed: i32,
+    pub tasks_passed: i32,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub duration_secs: Option<i64>,
+}
+
 /// Database query timeout in seconds
 const DB_QUERY_TIMEOUT_SECS: u64 = 30;
 
@@ -2375,6 +2434,263 @@ impl PgStorage {
             window_started_at: r.get(8),
             window_expires_at: r.get(9),
             created_at: r.get(10),
+        }))
+    }
+
+    /// Get detailed agent status with all phases and timings
+    /// Returns comprehensive status information for UI display
+    pub async fn get_detailed_agent_status(
+        &self,
+        agent_hash: &str,
+    ) -> Result<Option<DetailedAgentStatus>> {
+        let client = self.pool.get().await?;
+
+        // 1. Get submission info
+        let sub_row = client
+            .query_opt(
+                "SELECT 
+                    agent_hash, miner_hotkey, name, status, compile_status, compile_error,
+                    EXTRACT(EPOCH FROM created_at)::BIGINT as submitted_at,
+                    compile_time_ms,
+                    total_cost_usd::FLOAT8
+                FROM submissions WHERE agent_hash = $1",
+                &[&agent_hash],
+            )
+            .await?;
+
+        let sub = match sub_row {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        let miner_hotkey: String = sub.get(1);
+        let name: Option<String> = sub.get(2);
+        let status: String = sub.get(3);
+        let compile_status: String = sub
+            .get::<_, Option<String>>(4)
+            .unwrap_or_else(|| "pending".to_string());
+        let compile_error: Option<String> = sub.get(5);
+        let submitted_at: i64 = sub.get(6);
+        let compile_time_ms: Option<i32> = sub.get(7);
+        let total_cost_usd: f64 = sub.get(8);
+
+        // 2. Get validator assignments
+        let assignments = client
+            .query(
+                "SELECT validator_hotkey, EXTRACT(EPOCH FROM assigned_at)::BIGINT, status
+                FROM validator_assignments WHERE agent_hash = $1
+                ORDER BY assigned_at ASC",
+                &[&agent_hash],
+            )
+            .await?;
+
+        let validators_assigned = assignments.len() as i32;
+        let first_assignment_at: Option<i64> = assignments.first().map(|r| r.get(1));
+
+        // 3. Get task logs for timing info
+        let task_stats = client
+            .query_opt(
+                "SELECT 
+                    COUNT(*)::INTEGER as total,
+                    COUNT(CASE WHEN passed THEN 1 END)::INTEGER as passed,
+                    COUNT(CASE WHEN NOT passed THEN 1 END)::INTEGER as failed,
+                    MIN(EXTRACT(EPOCH FROM started_at))::BIGINT as first_task,
+                    MAX(EXTRACT(EPOCH FROM completed_at))::BIGINT as last_task
+                FROM task_logs WHERE agent_hash = $1",
+                &[&agent_hash],
+            )
+            .await?;
+
+        let (completed_tasks, passed_tasks, failed_tasks, first_task_at, last_task_at) =
+            if let Some(ts) = task_stats {
+                (
+                    ts.get::<_, i32>(0),
+                    ts.get::<_, i32>(1),
+                    ts.get::<_, i32>(2),
+                    ts.get::<_, Option<i64>>(3),
+                    ts.get::<_, Option<i64>>(4),
+                )
+            } else {
+                (0, 0, 0, None, None)
+            };
+
+        // 4. Get validator evaluations (completed)
+        let evaluations = client
+            .query(
+                "SELECT 
+                    validator_hotkey, tasks_passed, tasks_total, tasks_failed,
+                    EXTRACT(EPOCH FROM created_at)::BIGINT as completed_at
+                FROM validator_evaluations WHERE agent_hash = $1
+                ORDER BY created_at ASC",
+                &[&agent_hash],
+            )
+            .await?;
+
+        let validators_completed = evaluations.len() as i32;
+
+        // 5. Get per-validator task progress
+        let validator_task_stats = client
+            .query(
+                "SELECT 
+                    validator_hotkey,
+                    COUNT(*)::INTEGER as completed,
+                    COUNT(CASE WHEN passed THEN 1 END)::INTEGER as passed,
+                    MIN(EXTRACT(EPOCH FROM started_at))::BIGINT as first_task,
+                    MAX(EXTRACT(EPOCH FROM completed_at))::BIGINT as last_task
+                FROM task_logs WHERE agent_hash = $1
+                GROUP BY validator_hotkey",
+                &[&agent_hash],
+            )
+            .await?;
+
+        // Build validator progress list
+        let mut validator_details: Vec<ValidatorProgress> = Vec::new();
+
+        for assignment in &assignments {
+            let val_hotkey: String = assignment.get(0);
+            let assigned_at: i64 = assignment.get(1);
+
+            // Find evaluation if completed
+            let eval = evaluations.iter().find(|e| {
+                let h: String = e.get(0);
+                h == val_hotkey
+            });
+
+            // Find task stats for this validator
+            let task_stat = validator_task_stats.iter().find(|t| {
+                let h: String = t.get(0);
+                h == val_hotkey
+            });
+
+            let (tasks_completed, tasks_passed, started_at, last_task) = if let Some(ts) = task_stat
+            {
+                (
+                    ts.get::<_, i32>(1),
+                    ts.get::<_, i32>(2),
+                    ts.get::<_, Option<i64>>(3),
+                    ts.get::<_, Option<i64>>(4),
+                )
+            } else {
+                (0, 0, None, None)
+            };
+
+            let (status, completed_at, tasks_total) = if let Some(e) = eval {
+                let tasks_total: i32 = e.get(2);
+                let comp_at: i64 = e.get(4);
+                ("completed".to_string(), Some(comp_at), tasks_total)
+            } else if tasks_completed > 0 {
+                ("started".to_string(), None, 10) // 10 tasks per validator
+            } else {
+                ("assigned".to_string(), None, 10)
+            };
+
+            let duration_secs = match (started_at, completed_at.or(last_task)) {
+                (Some(start), Some(end)) => Some(end - start),
+                _ => None,
+            };
+
+            validator_details.push(ValidatorProgress {
+                validator_hotkey: val_hotkey,
+                status,
+                tasks_total,
+                tasks_completed,
+                tasks_passed,
+                started_at,
+                completed_at,
+                duration_secs,
+            });
+        }
+
+        // Calculate derived values
+        let compile_duration_secs = compile_time_ms.map(|ms| (ms / 1000) as i64);
+        let compile_completed_at = if compile_status == "success" || compile_status == "failed" {
+            compile_time_ms.map(|ms| submitted_at + (ms / 1000) as i64)
+        } else {
+            None
+        };
+
+        let agent_init_started_at = first_assignment_at;
+        let agent_init_completed_at = first_task_at;
+        let agent_init_duration_secs = match (agent_init_started_at, agent_init_completed_at) {
+            (Some(start), Some(end)) => Some(end - start),
+            _ => None,
+        };
+
+        let agent_running =
+            first_task_at.is_some() && (status == "pending" || validators_completed < 2);
+        let agent_run_duration_secs = if agent_running {
+            first_task_at.map(|start| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64
+                    - start
+            })
+        } else {
+            match (first_task_at, last_task_at) {
+                (Some(start), Some(end)) => Some(end - start),
+                _ => None,
+            }
+        };
+
+        let evaluation_status = if validators_completed >= 2 {
+            "completed"
+        } else if completed_tasks > 0 {
+            "running"
+        } else if first_assignment_at.is_some() {
+            "initializing"
+        } else {
+            "pending"
+        };
+
+        let evaluation_started_at = first_task_at;
+        let evaluation_completed_at = if validators_completed >= 2 {
+            last_task_at
+        } else {
+            None
+        };
+        let evaluation_duration_secs = match (evaluation_started_at, evaluation_completed_at) {
+            (Some(start), Some(end)) => Some(end - start),
+            _ => None,
+        };
+
+        // Validators currently evaluating (assigned but not completed)
+        let validators_evaluating = validator_details
+            .iter()
+            .filter(|v| v.status == "started")
+            .count() as i32;
+
+        // Total tasks (10 per validator * 3 validators = 30)
+        let total_tasks = validators_assigned * 10;
+
+        Ok(Some(DetailedAgentStatus {
+            agent_hash: agent_hash.to_string(),
+            miner_hotkey,
+            name,
+            status,
+            submitted_at,
+            compile_status,
+            compile_started_at: Some(submitted_at), // Compilation starts immediately
+            compile_completed_at,
+            compile_duration_secs,
+            compile_error,
+            agent_init_started_at,
+            agent_init_completed_at,
+            agent_init_duration_secs,
+            agent_running,
+            agent_run_duration_secs,
+            evaluation_status: evaluation_status.to_string(),
+            evaluation_started_at,
+            evaluation_completed_at,
+            evaluation_duration_secs,
+            total_tasks,
+            completed_tasks,
+            passed_tasks,
+            failed_tasks,
+            validators_assigned,
+            validators_completed,
+            validator_details,
+            total_cost_usd,
         }))
     }
 

@@ -1001,6 +1001,29 @@ pub async fn get_agent_details(
     Err((StatusCode::NOT_FOUND, "Agent not found".to_string()))
 }
 
+/// GET /api/v1/agent/:agent_hash/status - Get detailed agent status with all phases
+///
+/// No authentication required. Returns comprehensive status info including:
+/// - Compilation phase timing
+/// - Agent initialization timing  
+/// - Per-validator evaluation progress
+/// - Task completion stats
+pub async fn get_detailed_status(
+    State(state): State<Arc<ApiState>>,
+    Path(agent_hash): Path<String>,
+) -> Result<Json<crate::pg_storage::DetailedAgentStatus>, (StatusCode, String)> {
+    let status = state
+        .storage
+        .get_detailed_agent_status(&agent_hash)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    match status {
+        Some(s) => Ok(Json(s)),
+        None => Err((StatusCode::NOT_FOUND, "Agent not found".to_string())),
+    }
+}
+
 // ============================================================================
 // OWNER ENDPOINTS (Authenticated miners - their own data only)
 // ============================================================================

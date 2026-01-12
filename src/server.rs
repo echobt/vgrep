@@ -1617,6 +1617,8 @@ pub async fn run_server_with_mode(
                 get(api::get_agent_task_detail),
             )
             .route("/agent/:agent_hash/progress", get(api::get_agent_progress))
+            // Detailed agent status (all phases and timings)
+            .route("/agent/:agent_hash/status", get(api::get_detailed_status))
             .route(
                 "/validator/:hotkey/evaluations",
                 get(api::get_validator_evaluations_list),
