@@ -3244,7 +3244,6 @@ impl PgStorage {
                     agent_stderr, agent_stdout, test_output, steps_executed, failure_stage
              FROM task_logs 
              WHERE agent_hash = $1 AND validator_hotkey = $2
-               AND task_id != '__evaluation_failure__'
              ORDER BY completed_at ASC",
                 &[&agent_hash, &validator_hotkey],
             )
@@ -3494,7 +3493,6 @@ impl PgStorage {
                         agent_stderr, agent_stdout, test_output, steps_executed, failure_stage
                  FROM task_logs 
                  WHERE agent_hash = $1 AND validator_hotkey = $2
-                   AND task_id != '__evaluation_failure__'
                  ORDER BY completed_at DESC",
                 &[&agent_hash, &validator_hotkey],
             )
@@ -3571,8 +3569,7 @@ impl PgStorage {
                         COUNT(*) FILTER (WHERE passed = false) as failed,
                         MAX(EXTRACT(EPOCH FROM completed_at)::BIGINT) as last_update
                      FROM task_logs 
-                     WHERE agent_hash = $1 AND validator_hotkey = $2
-                       AND task_id != '__evaluation_failure__'",
+                     WHERE agent_hash = $1 AND validator_hotkey = $2",
                     &[&agent_hash, &validator_hotkey],
                 )
                 .await?;

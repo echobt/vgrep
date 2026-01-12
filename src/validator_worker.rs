@@ -70,6 +70,8 @@ pub struct ValidatorWorker {
     keypair: sr25519::Pair,
     validator_hotkey: String,
     http_client: reqwest::Client,
+    /// Dedicated client for critical operations (logs, submissions) to avoid saturation by streaming
+    critical_http_client: reqwest::Client,
     /// Track in-progress evaluations to avoid duplicates
     in_progress: Arc<RwLock<HashSet<String>>>,
     /// Loaded task registry (first 30 tasks from terminal-bench@2.0)
@@ -136,6 +138,12 @@ impl ValidatorWorker {
             validator_hotkey,
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(300))
+                .build()
+                .unwrap_or_default(),
+            critical_http_client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(300))
+                .pool_idle_timeout(Duration::from_secs(60))
+                .pool_max_idle_per_host(5)
                 .build()
                 .unwrap_or_default(),
             in_progress: Arc::new(RwLock::new(HashSet::new())),
@@ -367,6 +375,7 @@ impl ValidatorWorker {
             keypair: self.keypair.clone(),
             validator_hotkey: self.validator_hotkey.clone(),
             http_client: self.http_client.clone(),
+            critical_http_client: self.critical_http_client.clone(),
             in_progress: self.in_progress.clone(),
             task_registry: self.task_registry.clone(),
             container_backend: self.container_backend.clone(),
@@ -1457,7 +1466,7 @@ impl ValidatorWorker {
         const MAX_CONSECUTIVE_ERRORS: usize = 5;
 
         // Stream progress tracking
-        const STREAM_INTERVAL_MS: u64 = 2000; // Stream logs every 2 seconds
+        const STREAM_INTERVAL_MS: u64 = 60000; // Stream logs every 60 seconds (1 minute) as requested
         let mut last_stream_time = std::time::Instant::now();
         let mut last_stdout_len = 0usize;
         let mut last_stderr_len = 0usize;
@@ -1907,39 +1916,70 @@ impl ValidatorWorker {
         let signature = self.sign_message(&message);
 
         // API expects these fields from LogTaskRequest
-        let response = self
-            .http_client
-            .post(&url)
-            .json(&serde_json::json!({
-                "validator_hotkey": self.validator_hotkey,
-                "signature": signature,
-                "timestamp": now,
-                "agent_hash": agent_hash,
-                "task_id": task_id,
-                "task_name": task_id,  // Use task_id as task_name
-                "passed": passed,
-                "score": if passed { 1.0 } else { 0.0 },
-                "execution_time_ms": duration_ms,
-                "steps": steps_executed.unwrap_or(0),
-                "cost_usd": 0.0,  // Not tracked currently
-                "error": error,
-                "execution_log": null,
-                "trajectory": null,
-                "started_at": now - (duration_ms / 1000),
-                // Verbose logging fields
-                "agent_stderr": agent_stderr,
-                "agent_stdout": agent_stdout,
-                "test_output": test_output,
-                "steps_executed": steps_executed,
-                "failure_stage": failure_stage,
-            }))
-            .send()
-            .await?;
+        let body = serde_json::json!({
+            "validator_hotkey": self.validator_hotkey,
+            "signature": signature,
+            "timestamp": now,
+            "agent_hash": agent_hash,
+            "task_id": task_id,
+            "task_name": task_id,  // Use task_id as task_name
+            "passed": passed,
+            "score": if passed { 1.0 } else { 0.0 },
+            "execution_time_ms": duration_ms,
+            "steps": steps_executed.unwrap_or(0),
+            "cost_usd": 0.0,  // Not tracked currently
+            "error": error,
+            "execution_log": null,
+            "trajectory": null,
+            "started_at": now - (duration_ms / 1000),
+            // Verbose logging fields
+            "agent_stderr": agent_stderr,
+            "agent_stdout": agent_stdout,
+            "test_output": test_output,
+            "steps_executed": steps_executed,
+            "failure_stage": failure_stage,
+        });
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            anyhow::bail!("log_task failed: {} - {}", status, text);
+        // Retry loop for critical task logging
+        let mut last_error = None;
+        for attempt in 1..=3 {
+            match self
+                .critical_http_client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        return Ok(());
+                    } else {
+                        let status = response.status();
+                        let text = response.text().await.unwrap_or_default();
+                        last_error = Some(anyhow::anyhow!(
+                            "log_task failed (attempt {}): {} - {}",
+                            attempt,
+                            status,
+                            text
+                        ));
+                    }
+                }
+                Err(e) => {
+                    last_error = Some(anyhow::anyhow!(
+                        "log_task network error (attempt {}): {}",
+                        attempt,
+                        e
+                    ));
+                }
+            }
+            // Wait before retry
+            if attempt < 3 {
+                tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
+            }
+        }
+
+        if let Some(e) = last_error {
+            return Err(e);
         }
 
         Ok(())

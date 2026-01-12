@@ -602,7 +602,8 @@ pub struct CodeVisibilityError {
 ///
 /// Code is public if:
 /// - 48+ hours since submission AND disable_public_code = false
-/// - OR manually_validated = true
+///
+/// Note: manually_validated does NOT affect code visibility (only leaderboard eligibility)
 pub async fn get_agent_code(
     State(state): State<Arc<ApiState>>,
     Path(agent_hash): Path<String>,
@@ -642,19 +643,13 @@ pub async fn get_agent_code(
         ));
     }
 
-    // 3. Check visibility - time-based (48h) unless manually validated
+    // 3. Check visibility - time-based (48h)
+    // Note: manually_validated does NOT bypass this - it only affects leaderboard eligibility
     let now = chrono::Utc::now().timestamp();
     let hours_since = (now - submission.created_at) as f64 / 3600.0;
     const VISIBILITY_HOURS: f64 = 48.0;
 
-    // Check if manually_validated by querying the submission status
-    let is_manually_validated = state
-        .storage
-        .is_agent_manually_validated(&agent_hash)
-        .await
-        .unwrap_or(false);
-
-    if hours_since < VISIBILITY_HOURS && !is_manually_validated {
+    if hours_since < VISIBILITY_HOURS {
         let hours_remaining = VISIBILITY_HOURS - hours_since;
         return Err((
             StatusCode::FORBIDDEN,
