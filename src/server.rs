@@ -768,6 +768,8 @@ pub struct LeaderboardEntryResponse {
     pub name: Option<String>,
     pub consensus_score: f64,
     pub evaluation_count: u32,
+    pub weight: f64,
+    pub submitted_at: String,
 }
 
 pub async fn get_leaderboard(
@@ -790,16 +792,35 @@ pub async fn get_leaderboard(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Find the winner (first manually_validated entry with >= 2 validators and >= 8 tasks passed per validator)
+    let winner_hash: Option<String> = lb
+        .iter()
+        .find(|e| {
+            e.manually_validated
+                && e.num_validators >= 2
+                && e.total_tasks_passed >= 8 * e.num_validators
+        })
+        .map(|e| e.agent_hash.clone());
+
     let entries: Vec<LeaderboardEntryResponse> = lb
         .iter()
         .enumerate()
-        .map(|(i, e)| LeaderboardEntryResponse {
-            rank: (i + 1) as u32,
-            agent_hash: e.agent_hash.clone(),
-            miner_hotkey: e.miner_hotkey.clone(),
-            name: e.name.clone(),
-            consensus_score: e.total_tasks_passed as f64, // Use tasks_passed as score
-            evaluation_count: e.num_validators as u32,
+        .map(|(i, e)| {
+            let weight = if Some(&e.agent_hash) == winner_hash.as_ref() {
+                1.0
+            } else {
+                0.0
+            };
+            LeaderboardEntryResponse {
+                rank: (i + 1) as u32,
+                agent_hash: e.agent_hash.clone(),
+                miner_hotkey: e.miner_hotkey.clone(),
+                name: e.name.clone(),
+                consensus_score: e.total_tasks_passed as f64,
+                evaluation_count: e.num_validators as u32,
+                weight,
+                submitted_at: e.created_at.to_rfc3339(),
+            }
         })
         .collect();
 

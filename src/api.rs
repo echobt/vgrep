@@ -586,6 +586,8 @@ pub struct LeaderboardEntryResponse {
     pub tasks_total: i32,
     pub num_validators: i32,
     pub manually_validated: bool,
+    pub weight: f64,
+    pub submitted_at: String,
 }
 
 /// GET /api/v1/leaderboard - Get public leaderboard
@@ -604,18 +606,38 @@ pub async fn get_leaderboard(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Find the winner (first manually_validated entry with >= 2 validators and >= 8 tasks passed per validator)
+    let winner_hash: Option<String> = entries
+        .iter()
+        .find(|e| {
+            e.manually_validated
+                && e.num_validators >= 2
+                && e.total_tasks_passed >= 8 * e.num_validators
+        })
+        .map(|e| e.agent_hash.clone());
+
     let response_entries: Vec<LeaderboardEntryResponse> = entries
         .into_iter()
         .enumerate()
-        .map(|(i, e)| LeaderboardEntryResponse {
-            rank: (i + 1) as i32,
-            agent_hash: e.agent_hash,
-            miner_hotkey: e.miner_hotkey,
-            name: e.name,
-            tasks_passed: e.total_tasks_passed,
-            tasks_total: e.total_tasks,
-            num_validators: e.num_validators,
-            manually_validated: e.manually_validated,
+        .map(|(i, e)| {
+            // Weight is 1.0 for the winner (winner-takes-all), 0.0 for others
+            let weight = if Some(&e.agent_hash) == winner_hash.as_ref() {
+                1.0
+            } else {
+                0.0
+            };
+            LeaderboardEntryResponse {
+                rank: (i + 1) as i32,
+                agent_hash: e.agent_hash,
+                miner_hotkey: e.miner_hotkey,
+                name: e.name,
+                tasks_passed: e.total_tasks_passed,
+                tasks_total: e.total_tasks,
+                num_validators: e.num_validators,
+                manually_validated: e.manually_validated,
+                weight,
+                submitted_at: e.created_at.to_rfc3339(),
+            }
         })
         .collect();
 
