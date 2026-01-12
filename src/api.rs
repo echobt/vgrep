@@ -568,6 +568,238 @@ async fn get_active_validator_count(platform_url: &str) -> i32 {
 // LEADERBOARD ENDPOINTS (Public)
 // ============================================================================
 
+// ============================================================================
+// PUBLIC CODE ENDPOINT
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct AgentCodeResponse {
+    pub agent_hash: String,
+    pub is_package: bool,
+    pub package_format: Option<String>,
+    pub entry_point: String,
+    pub files: Vec<CodeFile>,
+    pub total_size: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CodeFile {
+    pub path: String,
+    pub content: String,
+    pub size: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CodeVisibilityError {
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hours_remaining: Option<f64>,
+}
+
+/// GET /api/v1/agent/{hash}/code - Get public agent code
+///
+/// Code is public if:
+/// - 48+ hours since submission AND disable_public_code = false
+/// - OR manually_validated = true
+pub async fn get_agent_code(
+    State(state): State<Arc<ApiState>>,
+    Path(agent_hash): Path<String>,
+) -> Result<Json<AgentCodeResponse>, (StatusCode, Json<CodeVisibilityError>)> {
+    // 1. Fetch submission
+    let submission = state
+        .storage
+        .get_submission(&agent_hash)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(CodeVisibilityError {
+                    error: format!("Database error: {}", e),
+                    hours_remaining: None,
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(CodeVisibilityError {
+                    error: "Agent not found".to_string(),
+                    hours_remaining: None,
+                }),
+            )
+        })?;
+
+    // 2. Check visibility - disabled by admin
+    if submission.disable_public_code {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(CodeVisibilityError {
+                error: "Code visibility disabled by owner".to_string(),
+                hours_remaining: None,
+            }),
+        ));
+    }
+
+    // 3. Check visibility - time-based (48h) unless manually validated
+    let now = chrono::Utc::now().timestamp();
+    let hours_since = (now - submission.created_at) as f64 / 3600.0;
+    const VISIBILITY_HOURS: f64 = 48.0;
+
+    // Check if manually_validated by querying the submission status
+    let is_manually_validated = state
+        .storage
+        .is_agent_manually_validated(&agent_hash)
+        .await
+        .unwrap_or(false);
+
+    if hours_since < VISIBILITY_HOURS && !is_manually_validated {
+        let hours_remaining = VISIBILITY_HOURS - hours_since;
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(CodeVisibilityError {
+                error: "Code not yet public".to_string(),
+                hours_remaining: Some(hours_remaining),
+            }),
+        ));
+    }
+
+    // 4. Build response
+    let (files, total_size, entry_point) = if submission.is_package {
+        // Extract files from package
+        if let Some(package_data) = &submission.package_data {
+            let format = submission.package_format.as_deref().unwrap_or("zip");
+            match extract_package_files(package_data, format) {
+                Ok(extracted) => {
+                    let total_size: usize = extracted.iter().map(|f| f.size).sum();
+                    let files: Vec<CodeFile> = extracted
+                        .into_iter()
+                        .map(|f| CodeFile {
+                            path: f.path,
+                            size: f.size,
+                            content: String::from_utf8_lossy(&f.content).to_string(),
+                        })
+                        .collect();
+                    let entry = submission
+                        .entry_point
+                        .unwrap_or_else(|| "agent.py".to_string());
+                    (files, total_size, entry)
+                }
+                Err(e) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(CodeVisibilityError {
+                            error: format!("Failed to extract package: {}", e),
+                            hours_remaining: None,
+                        }),
+                    ));
+                }
+            }
+        } else {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(CodeVisibilityError {
+                    error: "Package data not available".to_string(),
+                    hours_remaining: None,
+                }),
+            ));
+        }
+    } else {
+        // Single file submission
+        let size = submission.source_code.len();
+        let files = vec![CodeFile {
+            path: "agent.py".to_string(),
+            content: submission.source_code,
+            size,
+        }];
+        (files, size, "agent.py".to_string())
+    };
+
+    Ok(Json(AgentCodeResponse {
+        agent_hash: submission.agent_hash,
+        is_package: submission.is_package,
+        package_format: submission.package_format,
+        entry_point,
+        files,
+        total_size,
+    }))
+}
+
+/// Extract files from a package (ZIP or TAR.GZ)
+fn extract_package_files(
+    data: &[u8],
+    format: &str,
+) -> anyhow::Result<Vec<crate::package_validator::PackageFile>> {
+    use std::io::{Cursor, Read};
+
+    match format.to_lowercase().as_str() {
+        "zip" => {
+            let cursor = Cursor::new(data);
+            let mut archive = zip::ZipArchive::new(cursor)?;
+            let mut files = Vec::new();
+
+            for i in 0..archive.len() {
+                let mut file = archive.by_index(i)?;
+                if file.is_dir() {
+                    continue;
+                }
+
+                let path = file
+                    .enclosed_name()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+
+                if path.is_empty() {
+                    continue;
+                }
+
+                let mut content = Vec::new();
+                file.read_to_end(&mut content)?;
+
+                files.push(crate::package_validator::PackageFile {
+                    path,
+                    size: content.len(),
+                    content,
+                    is_python: false,
+                });
+            }
+            Ok(files)
+        }
+        "tar.gz" | "tgz" | "targz" => {
+            use flate2::read::GzDecoder;
+            use tar::Archive;
+
+            let cursor = Cursor::new(data);
+            let decoder = GzDecoder::new(cursor);
+            let mut archive = Archive::new(decoder);
+            let mut files = Vec::new();
+
+            for entry in archive.entries()? {
+                let mut entry = entry?;
+                if entry.header().entry_type().is_dir() {
+                    continue;
+                }
+
+                let path = entry.path()?.to_string_lossy().to_string();
+                let mut content = Vec::new();
+                entry.read_to_end(&mut content)?;
+
+                files.push(crate::package_validator::PackageFile {
+                    path,
+                    size: content.len(),
+                    content,
+                    is_python: false,
+                });
+            }
+            Ok(files)
+        }
+        _ => anyhow::bail!("Unsupported format: {}", format),
+    }
+}
+
+// ============================================================================
+// LEADERBOARD ENDPOINT
+// ============================================================================
+
 #[derive(Debug, Deserialize)]
 pub struct LeaderboardQuery {
     pub limit: Option<i64>,

@@ -1574,6 +1574,7 @@ pub async fn run_server_with_mode(
             .route("/submit", post(api::submit_agent))
             .route("/leaderboard", get(api::get_leaderboard))
             .route("/leaderboard/:agent_hash", get(api::get_agent_details))
+            .route("/agent/:agent_hash/code", get(api::get_agent_code))
             .route("/my/agents", post(api::list_my_agents))
             .route(
                 "/my/agents/:agent_hash/source",

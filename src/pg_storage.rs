@@ -895,6 +895,21 @@ impl PgStorage {
         }))
     }
 
+    /// Check if an agent has been manually validated
+    pub async fn is_agent_manually_validated(&self, agent_hash: &str) -> Result<bool> {
+        let client = self.pool.get().await?;
+        let row = client
+            .query_opt(
+                "SELECT manually_validated FROM submissions WHERE agent_hash = $1",
+                &[&agent_hash],
+            )
+            .await?;
+
+        Ok(row
+            .map(|r| r.get::<_, Option<bool>>(0).unwrap_or(false))
+            .unwrap_or(false))
+    }
+
     // ========================================================================
     // SUBMISSIONS (SENSITIVE - source code access controlled)
     // ========================================================================
