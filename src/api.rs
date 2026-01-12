@@ -587,6 +587,8 @@ pub struct LeaderboardEntryResponse {
     pub num_validators: i32,
     pub manually_validated: bool,
     pub weight: f64,
+    pub decay_multiplier: f64,
+    pub grace_period_remaining_hours: f64,
     pub submitted_at: String,
 }
 
@@ -606,6 +608,9 @@ pub async fn get_leaderboard(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Load time decay config from environment
+    let decay_config = crate::time_decay::TimeDecayConfig::from_env();
+
     // Find the winner (first manually_validated entry with >= 2 validators and >= 8 tasks passed per validator)
     let winner_hash: Option<String> = entries
         .iter()
@@ -620,9 +625,12 @@ pub async fn get_leaderboard(
         .into_iter()
         .enumerate()
         .map(|(i, e)| {
-            // Weight is 1.0 for the winner (winner-takes-all), 0.0 for others
+            // Calculate decay info for this entry
+            let decay_info = crate::time_decay::calculate_decay_info(e.created_at, &decay_config);
+
+            // Weight is decay_multiplier for the winner (winner-takes-all with decay), 0.0 for others
             let weight = if Some(&e.agent_hash) == winner_hash.as_ref() {
-                1.0
+                decay_info.multiplier
             } else {
                 0.0
             };
@@ -636,6 +644,8 @@ pub async fn get_leaderboard(
                 num_validators: e.num_validators,
                 manually_validated: e.manually_validated,
                 weight,
+                decay_multiplier: decay_info.multiplier,
+                grace_period_remaining_hours: decay_info.grace_period_remaining_hours,
                 submitted_at: e.created_at.to_rfc3339(),
             }
         })

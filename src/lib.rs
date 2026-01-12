@@ -63,6 +63,7 @@ pub mod sudo;
 pub mod task;
 pub mod task_execution;
 pub mod terminal_harness;
+pub mod time_decay;
 pub mod validator_distribution;
 pub mod x25519_encryption;
 
@@ -186,6 +187,10 @@ pub use task::{
 pub use task_execution::{
     EvaluationProgress, EvaluationResult, EvaluationStatus, LLMCallInfo, ProgressStore,
     TaskExecutionResult, TaskExecutionState, TaskExecutor, TaskStatus,
+};
+pub use time_decay::{
+    calculate_decay_info, calculate_decay_multiplier, DecayInfo, DecayStatusResponse,
+    TimeDecayConfig, TimeDecayConfigResponse, WinnerDecayStatus,
 };
 pub use validator_distribution::{
     CodePackage, DistributionConfig, ValidatorDistributor, ValidatorInfo,

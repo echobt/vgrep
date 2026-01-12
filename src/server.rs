@@ -226,11 +226,15 @@ pub struct WeightEntry {
 }
 
 /// GET /get_weights - Deterministic weight calculation
-/// Winner-takes-all: The best eligible agent gets 100% of the weight (1.0)
+/// Winner-takes-all: The best eligible agent gets weight based on time decay
 /// Eligibility requirements:
 /// - manually_validated = true
 /// - At least 2 validators have evaluated
 /// - At least 8 tasks passed per validator
+///
+/// Time decay:
+/// - Grace period: 40 epochs (~48 hours) - no decay
+/// - After grace: 50% decay per 20 epochs (~1 day)
 pub async fn get_weights(
     State(state): State<Arc<ChallengeServerState>>,
     Query(query): Query<GetWeightsQuery>,
@@ -245,6 +249,9 @@ pub async fn get_weights(
         )
     })?;
 
+    // Load time decay config from environment
+    let decay_config = crate::time_decay::TimeDecayConfig::from_env();
+
     // Get the eligible winner directly from our database
     let winner = pg
         .get_eligible_winner()
@@ -252,17 +259,31 @@ pub async fn get_weights(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let weights = if let Some(winner) = winner {
+        // Calculate time-based decay multiplier
+        let decay_info = crate::time_decay::calculate_decay_info(winner.created_at, &decay_config);
+        let decayed_weight = decay_info.multiplier;
+
         info!(
-            "Weight winner for epoch {}: {} (hotkey: {}, tasks_passed: {}, validators: {})",
+            "Weight winner for epoch {}: {} (hotkey: {}, tasks_passed: {}, validators: {}, decay: {:.2}% after {:.1}h)",
             epoch,
             winner.name.as_deref().unwrap_or(&winner.agent_hash[..16]),
             &winner.miner_hotkey[..16],
             winner.total_tasks_passed,
-            winner.num_validators
+            winner.num_validators,
+            decayed_weight * 100.0,
+            decay_info.age_hours
         );
+
+        if decay_info.decay_active {
+            info!(
+                "Time decay active: grace expired, {:.1} days decaying, multiplier={:.4}",
+                decay_info.days_decaying, decay_info.multiplier
+            );
+        }
+
         vec![WeightEntry {
             hotkey: winner.miner_hotkey,
-            weight: 1.0,
+            weight: decayed_weight,
         }]
     } else {
         info!("No eligible winner for epoch {} - no agents meet criteria (validated, >=2 validators, >=8 tasks/validator)", epoch);
