@@ -51,7 +51,7 @@ pub struct EvalResult {
 }
 
 /// Result of a single task execution
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TaskResult {
     passed: bool,
     duration_ms: i64,
@@ -843,6 +843,7 @@ impl ValidatorWorker {
 
         // Run tasks concurrently (MAX_CONCURRENT_TASKS_PER_AGENT at a time)
         // The global semaphore (MAX_CONCURRENT_TASK_CONTAINERS) limits total Docker containers
+        // IMPORTANT: Each task logs its result immediately after completion, not after all tasks finish
         let results: Vec<_> = stream::iter(remaining_tasks)
             .map(|task| {
                 let binary_path = binary_path.to_string();
@@ -856,61 +857,69 @@ impl ValidatorWorker {
                         task_id,
                         &instruction[..50.min(instruction.len())]
                     );
+
+                    // Execute the task
                     let result = worker
                         .run_task_in_docker(&binary_path, &task, &agent_hash)
                         .await;
-                    (task_id, task, result)
+
+                    // Convert result to TaskResult
+                    let task_result = match &result {
+                        Ok(tr) => {
+                            if tr.passed {
+                                info!("Task {} PASSED", task_id);
+                            } else {
+                                info!("Task {} FAILED", task_id);
+                            }
+                            tr.clone()
+                        }
+                        Err(e) => {
+                            warn!("Task {} error: {:?}", task_id, e);
+                            TaskResult {
+                                passed: false,
+                                duration_ms: 0,
+                                error: Some(format!("{:?}", e)),
+                                agent_stderr: Some(format!("Task execution error: {:?}", e)),
+                                test_output: None,
+                                steps_executed: None,
+                            }
+                        }
+                    };
+
+                    // Log task result IMMEDIATELY to platform server
+                    // This ensures results are saved even if other tasks are still running
+                    if let Err(e) = worker
+                        .log_task_result(
+                            &agent_hash,
+                            &task_id,
+                            task_result.passed,
+                            task_result.duration_ms,
+                            task_result.error.clone(),
+                            task_result.agent_stderr.clone(),
+                            None, // agent_stdout not separately tracked
+                            task_result.test_output.clone(),
+                            task_result.steps_executed,
+                            None, // not a global failure
+                        )
+                        .await
+                    {
+                        warn!("Failed to log task {} result: {}", task_id, e);
+                    }
+
+                    // Return whether task passed for counting
+                    result.map(|r| r.passed).unwrap_or(false)
                 }
             })
             .buffer_unordered(MAX_CONCURRENT_TASKS_PER_AGENT)
             .collect()
             .await;
 
-        // Process results and log to server
-        for (task_id, _task, result) in results {
-            let task_result = match result {
-                Ok(tr) => {
-                    if tr.passed {
-                        info!("Task {} PASSED", task_id);
-                        tasks_passed += 1;
-                    } else {
-                        info!("Task {} FAILED", task_id);
-                        tasks_failed += 1;
-                    }
-                    tr
-                }
-                Err(e) => {
-                    // Log full error chain with :? for debugging Docker issues
-                    warn!("Task {} error: {:?}", task_id, e);
-                    tasks_failed += 1;
-                    TaskResult {
-                        passed: false,
-                        duration_ms: 0,
-                        error: Some(format!("{:?}", e)),
-                        agent_stderr: Some(format!("Task execution error: {:?}", e)),
-                        test_output: None,
-                        steps_executed: None,
-                    }
-                }
-            };
-
-            // Log task result to platform server with full verbose details
-            if let Err(e) = self
-                .log_task_result(
-                    agent_hash,
-                    &task_id,
-                    task_result.passed,
-                    task_result.duration_ms,
-                    task_result.error.clone(),
-                    task_result.agent_stderr.clone(),
-                    None, // agent_stdout not separately tracked
-                    task_result.test_output.clone(),
-                    task_result.steps_executed,
-                    None, // not a global failure
-                )
-                .await
-            {
-                warn!("Failed to log task {} result: {}", task_id, e);
+        // Count results (logging already done above)
+        for passed in &results {
+            if *passed {
+                tasks_passed += 1;
+            } else {
+                tasks_failed += 1;
             }
         }
 
