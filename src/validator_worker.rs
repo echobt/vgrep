@@ -1798,24 +1798,10 @@ impl ValidatorWorker {
             .exec(&["mkdir", "-p", "/logs/verifier"])
             .await;
 
-        // Run test script with timeout
-        let result = tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            task_container.exec(&["bash", "-c", test_script]),
-        )
-        .await;
-
-        // Handle timeout
-        let result = match result {
-            Ok(r) => r,
-            Err(_) => {
-                warn!("Test script timed out after {}s", timeout_secs);
-                return Ok((
-                    false,
-                    format!("Test script timed out after {}s", timeout_secs),
-                ));
-            }
-        };
+        // Run test script with timeout passed to broker
+        let result = task_container
+            .exec_with_timeout(&["bash", "-c", test_script], timeout_secs)
+            .await;
 
         match result {
             Ok(exec_result) => {

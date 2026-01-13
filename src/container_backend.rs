@@ -114,8 +114,11 @@ pub trait ContainerHandle: Send + Sync {
     /// Remove the container
     async fn remove(&self) -> Result<()>;
 
-    /// Execute a command in the container
+    /// Execute a command in the container (default 60s timeout)
     async fn exec(&self, cmd: &[&str]) -> Result<ExecOutput>;
+
+    /// Execute a command in the container with custom timeout
+    async fn exec_with_timeout(&self, cmd: &[&str], timeout_secs: u64) -> Result<ExecOutput>;
 
     /// Get container logs
     async fn logs(&self, tail: usize) -> Result<String>;
@@ -445,11 +448,15 @@ impl ContainerHandle for BrokerContainerHandle {
     }
 
     async fn exec(&self, cmd: &[&str]) -> Result<ExecOutput> {
+        self.exec_with_timeout(cmd, 60).await
+    }
+
+    async fn exec_with_timeout(&self, cmd: &[&str], timeout_secs: u64) -> Result<ExecOutput> {
         let request = BrokerRequest::Exec {
             container_id: self.container_id.clone(),
             command: cmd.iter().map(|s| s.to_string()).collect(),
             working_dir: None,
-            timeout_secs: 60,
+            timeout_secs: timeout_secs as u32,
             request_id: Self::request_id(),
         };
 
@@ -919,11 +926,15 @@ impl ContainerHandle for WsBrokerContainerHandle {
     }
 
     async fn exec(&self, cmd: &[&str]) -> Result<ExecOutput> {
+        self.exec_with_timeout(cmd, 60).await
+    }
+
+    async fn exec_with_timeout(&self, cmd: &[&str], timeout_secs: u64) -> Result<ExecOutput> {
         let request = BrokerRequest::Exec {
             container_id: self.container_id.clone(),
             command: cmd.iter().map(|s| s.to_string()).collect(),
             working_dir: None,
-            timeout_secs: 60,
+            timeout_secs: timeout_secs as u32,
             request_id: Self::request_id(),
         };
 
@@ -1347,6 +1358,10 @@ impl ContainerHandle for DirectDockerHandle {
     }
 
     async fn exec(&self, cmd: &[&str]) -> Result<ExecOutput> {
+        self.exec_with_timeout(cmd, 60).await
+    }
+
+    async fn exec_with_timeout(&self, cmd: &[&str], timeout_secs: u64) -> Result<ExecOutput> {
         let exec = self
             .docker
             .create_exec(
@@ -1363,20 +1378,35 @@ impl ContainerHandle for DirectDockerHandle {
         let mut stdout = String::new();
         let mut stderr = String::new();
 
-        if let StartExecResults::Attached {
-            output: mut stream, ..
-        } = self.docker.start_exec(&exec.id, None).await?
-        {
-            while let Some(chunk) = stream.next().await {
-                match chunk {
-                    Ok(LogOutput::StdOut { message }) => {
-                        stdout.push_str(&String::from_utf8_lossy(&message));
+        let exec_future = async {
+            if let StartExecResults::Attached {
+                output: mut stream, ..
+            } = self.docker.start_exec(&exec.id, None).await?
+            {
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(LogOutput::StdOut { message }) => {
+                            stdout.push_str(&String::from_utf8_lossy(&message));
+                        }
+                        Ok(LogOutput::StdErr { message }) => {
+                            stderr.push_str(&String::from_utf8_lossy(&message));
+                        }
+                        _ => {}
                     }
-                    Ok(LogOutput::StdErr { message }) => {
-                        stderr.push_str(&String::from_utf8_lossy(&message));
-                    }
-                    _ => {}
                 }
+            }
+            Ok::<(), anyhow::Error>(())
+        };
+
+        match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), exec_future).await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                return Ok(ExecOutput {
+                    stdout,
+                    stderr: "Command timed out".to_string(),
+                    exit_code: -1,
+                });
             }
         }
 
