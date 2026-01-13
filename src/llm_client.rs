@@ -439,4 +439,444 @@ mod tests {
         // Should have some default value even if env vars aren't set
         assert!(!config.model.is_empty());
     }
+
+    #[test]
+    fn test_llm_client_from_env() {
+        let client = LlmClient::from_env();
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_llm_config_clone() {
+        let config1 = LlmConfig {
+            api_base: "https://api.test.com".to_string(),
+            api_key: "key123".to_string(),
+            model: "model-x".to_string(),
+            max_tokens: 512,
+            temperature: 0.8,
+            timeout_secs: 45,
+        };
+
+        let config2 = config1.clone();
+        assert_eq!(config1.api_base, config2.api_base);
+        assert_eq!(config1.api_key, config2.api_key);
+        assert_eq!(config1.model, config2.model);
+        assert_eq!(config1.max_tokens, config2.max_tokens);
+        assert_eq!(config1.temperature, config2.temperature);
+        assert_eq!(config1.timeout_secs, config2.timeout_secs);
+    }
+
+    #[test]
+    fn test_message_with_special_characters() {
+        let msg = Message::user("Hello\nWorld\t\"quoted\"");
+        assert_eq!(msg.content, "Hello\nWorld\t\"quoted\"");
+        assert_eq!(msg.role, "user");
+    }
+
+    #[test]
+    fn test_message_debug() {
+        let msg = Message::system("test");
+        let debug_str = format!("{:?}", msg);
+        assert!(debug_str.contains("Message"));
+        assert!(debug_str.contains("test"));
+    }
+
+    #[test]
+    fn test_chat_request_debug() {
+        let req = ChatRequest {
+            model: "test-model".to_string(),
+            messages: vec![],
+            max_tokens: 100,
+            temperature: 0.5,
+        };
+        let debug_str = format!("{:?}", req);
+        assert!(debug_str.contains("ChatRequest"));
+    }
+
+    #[test]
+    fn test_build_user_message_with_all_fields() {
+        let config = LlmConfig::default();
+        let client = LlmClient::new(config).unwrap();
+
+        let req = AgentRequest {
+            instruction: "Complete task".to_string(),
+            step: 5,
+            cwd: "/workspace".to_string(),
+            last_command: Some("echo hello".to_string()),
+            exit_code: Some(1),
+            output: Some("error message".to_string()),
+        };
+
+        let msg = client.build_user_message(&req);
+        assert!(msg.contains("Complete task"));
+        assert!(msg.contains("STEP: 5"));
+        assert!(msg.contains("/workspace"));
+        assert!(msg.contains("echo hello"));
+        assert!(msg.contains("EXIT CODE: 1"));
+        assert!(msg.contains("error message"));
+    }
+
+    #[test]
+    fn test_build_user_message_exact_truncation_boundary() {
+        let config = LlmConfig::default();
+        let client = LlmClient::new(config).unwrap();
+
+        // Exactly 16000 characters - should not truncate
+        let exact_output = "x".repeat(16000);
+        let req = AgentRequest {
+            instruction: "Test".to_string(),
+            step: 1,
+            cwd: "/".to_string(),
+            last_command: None,
+            exit_code: None,
+            output: Some(exact_output.clone()),
+        };
+
+        let msg = client.build_user_message(&req);
+        assert!(!msg.contains("[truncated]"));
+        assert!(msg.contains(&exact_output));
+    }
+
+    #[test]
+    fn test_build_user_message_just_over_truncation() {
+        let config = LlmConfig::default();
+        let client = LlmClient::new(config).unwrap();
+
+        // 16001 characters - should truncate
+        let over_output = "x".repeat(16001);
+        let req = AgentRequest {
+            instruction: "Test".to_string(),
+            step: 1,
+            cwd: "/".to_string(),
+            last_command: None,
+            exit_code: None,
+            output: Some(over_output),
+        };
+
+        let msg = client.build_user_message(&req);
+        assert!(msg.contains("[truncated]"));
+    }
+
+    #[test]
+    fn test_build_user_message_with_none_exit_code() {
+        let config = LlmConfig::default();
+        let client = LlmClient::new(config).unwrap();
+
+        let req = AgentRequest {
+            instruction: "Task".to_string(),
+            step: 1,
+            cwd: "/".to_string(),
+            last_command: Some("cmd".to_string()),
+            exit_code: None,
+            output: None,
+        };
+
+        let msg = client.build_user_message(&req);
+        assert!(msg.contains("LAST COMMAND: cmd"));
+        assert!(!msg.contains("EXIT CODE"));
+    }
+
+    #[test]
+    fn test_build_user_message_zero_exit_code() {
+        let config = LlmConfig::default();
+        let client = LlmClient::new(config).unwrap();
+
+        let req = AgentRequest {
+            instruction: "Task".to_string(),
+            step: 1,
+            cwd: "/".to_string(),
+            last_command: Some("cmd".to_string()),
+            exit_code: Some(0),
+            output: None,
+        };
+
+        let msg = client.build_user_message(&req);
+        assert!(msg.contains("EXIT CODE: 0"));
+    }
+
+    #[test]
+    fn test_system_prompt_contains_rules() {
+        let config = LlmConfig::default();
+        let client = LlmClient::new(config).unwrap();
+        let prompt = client.system_prompt();
+
+        assert!(prompt.contains("RESPONSE FORMAT"));
+        assert!(prompt.contains("RULES"));
+        assert!(prompt.contains("One command at a time"));
+        assert!(prompt.contains("valid JSON only"));
+    }
+
+    #[test]
+    fn test_chat_request_with_multiple_messages() {
+        let req = ChatRequest {
+            model: "test".to_string(),
+            messages: vec![
+                Message::system("sys"),
+                Message::user("user"),
+                Message::assistant("assist"),
+            ],
+            max_tokens: 100,
+            temperature: 0.5,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("sys"));
+        assert!(json.contains("user"));
+        assert!(json.contains("assist"));
+    }
+
+    #[test]
+    fn test_chat_request_empty_messages() {
+        let req = ChatRequest {
+            model: "test".to_string(),
+            messages: vec![],
+            max_tokens: 100,
+            temperature: 0.5,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("test"));
+        assert!(json.contains("messages"));
+    }
+
+    #[test]
+    fn test_message_role_variants() {
+        let system = Message::system("s");
+        let user = Message::user("u");
+        let assistant = Message::assistant("a");
+
+        assert_eq!(system.role, "system");
+        assert_eq!(user.role, "user");
+        assert_eq!(assistant.role, "assistant");
+    }
+
+    #[test]
+    fn test_llm_config_default_values() {
+        let config = LlmConfig::default();
+
+        assert_eq!(config.max_tokens, 2048);
+        assert_eq!(config.temperature, 0.3);
+        assert_eq!(config.timeout_secs, 120);
+        assert!(!config.api_base.is_empty());
+    }
+
+    #[test]
+    fn test_llm_config_custom_timeout() {
+        let config = LlmConfig {
+            api_base: "https://api.test.com".to_string(),
+            api_key: "key".to_string(),
+            model: "model".to_string(),
+            max_tokens: 1000,
+            temperature: 0.5,
+            timeout_secs: 180,
+        };
+
+        assert_eq!(config.timeout_secs, 180);
+    }
+
+    #[test]
+    fn test_llm_config_zero_temperature() {
+        let config = LlmConfig {
+            api_base: "https://api.test.com".to_string(),
+            api_key: "key".to_string(),
+            model: "model".to_string(),
+            max_tokens: 1000,
+            temperature: 0.0,
+            timeout_secs: 60,
+        };
+
+        assert_eq!(config.temperature, 0.0);
+    }
+
+    #[test]
+    fn test_llm_config_high_temperature() {
+        let config = LlmConfig {
+            api_base: "https://api.test.com".to_string(),
+            api_key: "key".to_string(),
+            model: "model".to_string(),
+            max_tokens: 1000,
+            temperature: 1.0,
+            timeout_secs: 60,
+        };
+
+        assert_eq!(config.temperature, 1.0);
+    }
+
+    #[test]
+    fn test_message_serialization_format() {
+        let msg = Message::user("test content");
+        let json = serde_json::to_value(&msg).unwrap();
+
+        assert_eq!(json["role"], "user");
+        assert_eq!(json["content"], "test content");
+    }
+
+    #[test]
+    fn test_message_deserialization_various_roles() {
+        let system_json = r#"{"role":"system","content":"System message"}"#;
+        let user_json = r#"{"role":"user","content":"User message"}"#;
+        let assistant_json = r#"{"role":"assistant","content":"Assistant message"}"#;
+
+        let system: Message = serde_json::from_str(system_json).unwrap();
+        let user: Message = serde_json::from_str(user_json).unwrap();
+        let assistant: Message = serde_json::from_str(assistant_json).unwrap();
+
+        assert_eq!(system.role, "system");
+        assert_eq!(user.role, "user");
+        assert_eq!(assistant.role, "assistant");
+    }
+
+    #[test]
+    fn test_chat_response_deserialization() {
+        let json = r#"{
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Response text"
+                    }
+                }
+            ]
+        }"#;
+
+        let response: ChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.choices.len(), 1);
+        assert_eq!(response.choices[0].message.content, "Response text");
+        assert_eq!(response.choices[0].message.role, "assistant");
+    }
+
+    #[test]
+    fn test_chat_response_empty_choices() {
+        let json = r#"{"choices": []}"#;
+        let response: ChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.choices.len(), 0);
+    }
+
+    #[test]
+    fn test_build_user_message_multiline_output() {
+        let config = LlmConfig::default();
+        let client = LlmClient::new(config).unwrap();
+
+        let output = "line1\nline2\nline3";
+        let req = AgentRequest {
+            instruction: "Task".to_string(),
+            step: 1,
+            cwd: "/".to_string(),
+            last_command: None,
+            exit_code: None,
+            output: Some(output.to_string()),
+        };
+
+        let msg = client.build_user_message(&req);
+        assert!(msg.contains("line1"));
+        assert!(msg.contains("line2"));
+        assert!(msg.contains("line3"));
+    }
+
+    #[test]
+    fn test_build_user_message_formats_correctly() {
+        let config = LlmConfig::default();
+        let client = LlmClient::new(config).unwrap();
+
+        let req = AgentRequest {
+            instruction: "My task".to_string(),
+            step: 3,
+            cwd: "/home".to_string(),
+            last_command: None,
+            exit_code: None,
+            output: None,
+        };
+
+        let msg = client.build_user_message(&req);
+        assert!(msg.starts_with("TASK: My task"));
+        assert!(msg.contains("\n\nSTEP: 3"));
+        assert!(msg.contains("\nCWD: /home"));
+    }
+
+    #[test]
+    fn test_message_long_content() {
+        let long_content = "a".repeat(10000);
+        let msg = Message::user(&long_content);
+        assert_eq!(msg.content.len(), 10000);
+    }
+
+    #[test]
+    fn test_llm_config_empty_api_key() {
+        let config = LlmConfig {
+            api_base: "https://api.test.com".to_string(),
+            api_key: "".to_string(),
+            model: "model".to_string(),
+            max_tokens: 1000,
+            temperature: 0.5,
+            timeout_secs: 60,
+        };
+
+        assert_eq!(config.api_key, "");
+    }
+
+    #[test]
+    fn test_llm_config_various_models() {
+        let models = vec![
+            "gpt-4",
+            "claude-3-opus",
+            "anthropic/claude-3.5-sonnet",
+            "deepseek-ai/DeepSeek-V3",
+        ];
+
+        for model in models {
+            let config = LlmConfig {
+                api_base: "https://api.test.com".to_string(),
+                api_key: "key".to_string(),
+                model: model.to_string(),
+                max_tokens: 1000,
+                temperature: 0.5,
+                timeout_secs: 60,
+            };
+            assert_eq!(config.model, model);
+        }
+    }
+
+    #[test]
+    fn test_build_user_message_negative_exit_code() {
+        let config = LlmConfig::default();
+        let client = LlmClient::new(config).unwrap();
+
+        let req = AgentRequest {
+            instruction: "Task".to_string(),
+            step: 1,
+            cwd: "/".to_string(),
+            last_command: Some("cmd".to_string()),
+            exit_code: Some(-1),
+            output: None,
+        };
+
+        let msg = client.build_user_message(&req);
+        assert!(msg.contains("EXIT CODE: -1"));
+    }
+
+    #[test]
+    fn test_chat_request_with_max_tokens_edge_cases() {
+        let small = ChatRequest {
+            model: "test".to_string(),
+            messages: vec![],
+            max_tokens: 1,
+            temperature: 0.5,
+        };
+        assert_eq!(small.max_tokens, 1);
+
+        let large = ChatRequest {
+            model: "test".to_string(),
+            messages: vec![],
+            max_tokens: 100000,
+            temperature: 0.5,
+        };
+        assert_eq!(large.max_tokens, 100000);
+    }
+
+    #[test]
+    fn test_message_unicode_content() {
+        let unicode = "Hello 世界 🌍 Привет";
+        let msg = Message::user(unicode);
+        assert_eq!(msg.content, unicode);
+    }
 }
