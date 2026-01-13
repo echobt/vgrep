@@ -1038,4 +1038,490 @@ mod tests {
         assert!(task.test_files.contains_key("test.py"));
         assert!(task.test_files.contains_key("input.txt"));
     }
+
+    #[test]
+    fn test_task_result_success() {
+        let result = TaskResult::success(
+            "task1".to_string(),
+            "agent123".to_string(),
+            5000,
+            "All tests passed".to_string(),
+            "Agent output".to_string(),
+        );
+
+        assert_eq!(result.task_id, "task1");
+        assert_eq!(result.agent_hash, "agent123");
+        assert!(result.passed);
+        assert_eq!(result.score, 1.0);
+        assert_eq!(result.execution_time_ms, 5000);
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn test_task_result_failure() {
+        let result = TaskResult::failure(
+            "task2".to_string(),
+            "agent456".to_string(),
+            3000,
+            "Test failed".to_string(),
+            "Agent output".to_string(),
+            "AssertionError".to_string(),
+        );
+
+        assert_eq!(result.task_id, "task2");
+        assert!(!result.passed);
+        assert_eq!(result.score, 0.0);
+        assert_eq!(result.error, Some("AssertionError".to_string()));
+    }
+
+    #[test]
+    fn test_task_result_timeout() {
+        let result = TaskResult::timeout("task3".to_string(), "agent789".to_string(), 10000);
+
+        assert_eq!(result.task_id, "task3");
+        assert!(!result.passed);
+        assert_eq!(result.score, 0.0);
+        assert_eq!(result.execution_time_ms, 10000);
+        assert_eq!(result.error, Some("Task timed out".to_string()));
+        assert!(result.test_output.is_empty());
+        assert!(result.agent_output.is_empty());
+    }
+
+    #[test]
+    fn test_task_registry_empty() {
+        let registry = TaskRegistry::empty();
+        assert_eq!(registry.count(), 0);
+        assert!(registry.task_ids().is_empty());
+        assert!(registry.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_task_registry_add_task() {
+        let mut registry = TaskRegistry::empty();
+        let task = Task::from_components(
+            "new-task".to_string(),
+            TaskConfig {
+                id: "new-task".to_string(),
+                name: "New Task".to_string(),
+                ..Default::default()
+            },
+            "#!/bin/bash\necho test".to_string(),
+            None,
+            None,
+        );
+
+        registry.add_task(task).unwrap();
+        assert_eq!(registry.count(), 1);
+        assert!(registry.get("new-task").is_some());
+    }
+
+    #[test]
+    fn test_task_registry_add_duplicate_task() {
+        let mut registry = TaskRegistry::empty();
+        let task1 = Task::from_components(
+            "dup-task".to_string(),
+            TaskConfig {
+                id: "dup-task".to_string(),
+                ..Default::default()
+            },
+            "#!/bin/bash".to_string(),
+            None,
+            None,
+        );
+
+        let task2 = Task::from_components(
+            "dup-task".to_string(),
+            TaskConfig {
+                id: "dup-task".to_string(),
+                ..Default::default()
+            },
+            "#!/bin/bash".to_string(),
+            None,
+            None,
+        );
+
+        registry.add_task(task1).unwrap();
+        let result = registry.add_task(task2);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn test_task_registry_remove_task() {
+        let mut registry = TaskRegistry::empty();
+        let task = Task::from_components(
+            "remove-me".to_string(),
+            TaskConfig::default(),
+            "#!/bin/bash".to_string(),
+            None,
+            None,
+        );
+
+        registry.add_task(task).unwrap();
+        assert_eq!(registry.count(), 1);
+
+        let removed = registry.remove_task("remove-me").unwrap();
+        assert!(removed.is_some());
+        assert_eq!(registry.count(), 0);
+
+        // Remove again should return None
+        let removed_again = registry.remove_task("remove-me").unwrap();
+        assert!(removed_again.is_none());
+    }
+
+    #[test]
+    fn test_task_registry_update_task() {
+        let mut registry = TaskRegistry::empty();
+        let task = Task::from_components(
+            "update-me".to_string(),
+            TaskConfig {
+                id: "update-me".to_string(),
+                name: "Original Name".to_string(),
+                ..Default::default()
+            },
+            "#!/bin/bash".to_string(),
+            None,
+            None,
+        );
+
+        registry.add_task(task).unwrap();
+
+        let new_config = TaskConfig {
+            id: "update-me".to_string(),
+            name: "Updated Name".to_string(),
+            ..Default::default()
+        };
+
+        registry.update_task("update-me", new_config).unwrap();
+
+        let updated_task = registry.get("update-me").unwrap();
+        assert_eq!(updated_task.config.name, "Updated Name");
+    }
+
+    #[test]
+    fn test_task_registry_update_nonexistent_task() {
+        let mut registry = TaskRegistry::empty();
+        let result = registry.update_task("nonexistent", TaskConfig::default());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_task_registry_get_tasks() {
+        let mut registry = TaskRegistry::empty();
+        for i in 0..3 {
+            let task = Task::from_components(
+                format!("task-{}", i),
+                TaskConfig {
+                    id: format!("task-{}", i),
+                    ..Default::default()
+                },
+                "#!/bin/bash".to_string(),
+                None,
+                None,
+            );
+            registry.add_task(task).unwrap();
+        }
+
+        let task_ids = registry.task_ids();
+        assert_eq!(task_ids.len(), 3);
+        assert!(task_ids.contains(&"task-0".to_string()));
+        assert!(task_ids.contains(&"task-1".to_string()));
+        assert!(task_ids.contains(&"task-2".to_string()));
+    }
+
+    #[test]
+    fn test_task_registry_tasks_by_difficulty() {
+        let mut registry = TaskRegistry::empty();
+
+        for (i, diff) in [Difficulty::Easy, Difficulty::Medium, Difficulty::Hard]
+            .iter()
+            .enumerate()
+        {
+            let task = Task::from_components(
+                format!("task-{}", i),
+                TaskConfig {
+                    difficulty: *diff,
+                    ..Default::default()
+                },
+                "#!/bin/bash".to_string(),
+                None,
+                None,
+            );
+            registry.add_task(task).unwrap();
+        }
+
+        let easy_tasks = registry.tasks_by_difficulty(Difficulty::Easy);
+        assert_eq!(easy_tasks.len(), 1);
+
+        let medium_tasks = registry.tasks_by_difficulty(Difficulty::Medium);
+        assert_eq!(medium_tasks.len(), 1);
+
+        let hard_tasks = registry.tasks_by_difficulty(Difficulty::Hard);
+        assert_eq!(hard_tasks.len(), 1);
+    }
+
+    #[test]
+    fn test_task_registry_random_tasks() {
+        let mut registry = TaskRegistry::empty();
+        for i in 0..10 {
+            let task = Task::from_components(
+                format!("task-{}", i),
+                TaskConfig::default(),
+                "#!/bin/bash".to_string(),
+                None,
+                None,
+            );
+            registry.add_task(task).unwrap();
+        }
+
+        let random = registry.random_tasks(5);
+        assert_eq!(random.len(), 5);
+
+        // Request more than available
+        let all_random = registry.random_tasks(20);
+        assert_eq!(all_random.len(), 10);
+    }
+
+    #[test]
+    fn test_task_registry_list_tasks() {
+        let mut registry = TaskRegistry::empty();
+        let task = Task::from_components(
+            "list-task".to_string(),
+            TaskConfig {
+                id: "list-task".to_string(),
+                name: "List Test".to_string(),
+                difficulty: Difficulty::Hard,
+                tags: vec!["test".to_string(), "example".to_string()],
+                ..Default::default()
+            },
+            "#!/bin/bash".to_string(),
+            None,
+            None,
+        );
+
+        registry.add_task(task).unwrap();
+        let tasks = registry.list_tasks();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "list-task");
+        assert_eq!(tasks[0].name, "List Test");
+        assert_eq!(tasks[0].difficulty, Difficulty::Hard);
+        assert_eq!(tasks[0].tags.len(), 2);
+        assert!(!tasks[0].is_terminal_bench_format);
+        assert!(!tasks[0].has_path);
+    }
+
+    #[test]
+    fn test_task_from_components_with_empty_id() {
+        let task = Task::from_components(
+            "provided-id".to_string(),
+            TaskConfig {
+                id: "".to_string(), // Empty ID
+                name: "".to_string(),
+                ..Default::default()
+            },
+            "#!/bin/bash".to_string(),
+            None,
+            None,
+        );
+
+        assert_eq!(task.id(), "provided-id");
+        assert_eq!(task.config.name, "provided-id"); // Should use ID as name
+    }
+
+    #[test]
+    fn test_task_instruction_for_key() {
+        let task = Task::from_components(
+            "test".to_string(),
+            TaskConfig {
+                descriptions: vec![
+                    TaskDescription {
+                        key: "easy".to_string(),
+                        description: "Easy version".to_string(),
+                    },
+                    TaskDescription {
+                        key: "hard".to_string(),
+                        description: "Hard version".to_string(),
+                    },
+                ],
+                ..Default::default()
+            },
+            "#!/bin/bash".to_string(),
+            None,
+            None,
+        );
+
+        assert_eq!(task.instruction(), "Easy version");
+        assert_eq!(task.instruction_for_key("easy"), "Easy version");
+        assert_eq!(task.instruction_for_key("hard"), "Hard version");
+        assert_eq!(task.instruction_for_key("nonexistent"), "Easy version"); // Falls back to first
+    }
+
+    #[test]
+    fn test_task_is_terminal_bench_format() {
+        let native_task = Task::from_components(
+            "native".to_string(),
+            TaskConfig {
+                instruction: "Simple instruction".to_string(),
+                ..Default::default()
+            },
+            "#!/bin/bash".to_string(),
+            None,
+            None,
+        );
+
+        assert!(!native_task.is_terminal_bench_format());
+
+        let bench_task = Task::from_components(
+            "bench".to_string(),
+            TaskConfig {
+                descriptions: vec![TaskDescription {
+                    key: "base".to_string(),
+                    description: "Base".to_string(),
+                }],
+                ..Default::default()
+            },
+            "#!/bin/bash".to_string(),
+            None,
+            None,
+        );
+
+        assert!(bench_task.is_terminal_bench_format());
+    }
+
+    #[test]
+    fn test_task_registry_tasks_dir() {
+        use std::path::PathBuf;
+        let registry = TaskRegistry::empty();
+        assert_eq!(registry.tasks_dir(), &PathBuf::new());
+    }
+
+    #[test]
+    fn test_task_registry_count_and_tasks() {
+        let mut registry = TaskRegistry::empty();
+        assert_eq!(registry.count(), 0);
+
+        for i in 0..5 {
+            let task = Task::from_components(
+                format!("task{}", i),
+                TaskConfig::default(),
+                "#!/bin/bash".to_string(),
+                None,
+                None,
+            );
+            registry.add_task(task).unwrap();
+        }
+
+        assert_eq!(registry.count(), 5);
+        let all_tasks: Vec<_> = registry.tasks().collect();
+        assert_eq!(all_tasks.len(), 5);
+    }
+
+    #[test]
+    fn test_add_task_request_with_all_fields() {
+        let mut test_files = std::collections::HashMap::new();
+        test_files.insert("test.py".to_string(), "print('test')".to_string());
+
+        let request = AddTaskRequest {
+            id: "full-task".to_string(),
+            config: TaskConfig {
+                id: "full-task".to_string(),
+                name: "Full Task".to_string(),
+                instruction: "Complete task".to_string(),
+                difficulty: Difficulty::Hard,
+                timeout_secs: 300.0,
+                test_timeout_secs: 60.0,
+                tags: vec!["complete".to_string()],
+                ..Default::default()
+            },
+            test_script: "#!/bin/bash\necho test".to_string(),
+            solution_script: Some("#!/bin/bash\necho solution".to_string()),
+            setup_script: Some("#!/bin/bash\necho setup".to_string()),
+            dockerfile: Some("FROM ubuntu".to_string()),
+            docker_compose: Some("version: '3'".to_string()),
+            test_files,
+            persist: true,
+        };
+
+        let task = request.into_task();
+        assert_eq!(task.id(), "full-task");
+        assert!(task.solution_script.is_some());
+        assert!(task.setup_script.is_some());
+        assert!(task.dockerfile.is_some());
+        assert!(task.docker_compose.is_some());
+        assert_eq!(task.test_files.len(), 1);
+    }
+
+    #[test]
+    fn test_task_info_clone() {
+        let info = TaskInfo {
+            id: "task1".to_string(),
+            name: "Task 1".to_string(),
+            difficulty: Difficulty::Medium,
+            tags: vec!["tag1".to_string()],
+            is_terminal_bench_format: false,
+            has_path: true,
+        };
+
+        let cloned = info.clone();
+        assert_eq!(cloned.id, "task1");
+        assert_eq!(cloned.name, "Task 1");
+        assert!(cloned.has_path);
+    }
+
+    #[test]
+    fn test_task_config_get_instruction_with_nonexistent_key() {
+        let config = TaskConfig {
+            descriptions: vec![TaskDescription {
+                key: "first".to_string(),
+                description: "First description".to_string(),
+            }],
+            instruction: "Fallback instruction".to_string(),
+            ..Default::default()
+        };
+
+        // With terminal-bench format, nonexistent key falls back to first description
+        assert_eq!(
+            config.get_instruction(Some("nonexistent")),
+            "First description"
+        );
+    }
+
+    #[test]
+    fn test_task_config_with_empty_descriptions() {
+        let config = TaskConfig {
+            descriptions: vec![],
+            instruction: "Main instruction".to_string(),
+            ..Default::default()
+        };
+
+        assert!(!config.is_terminal_bench_format());
+        assert_eq!(config.get_instruction(None), "Main instruction");
+        assert_eq!(config.get_instruction(Some("any")), "Main instruction");
+    }
+
+    #[test]
+    fn test_difficulty_clone_and_debug() {
+        let diff = Difficulty::Hard;
+        let cloned = diff.clone();
+        assert_eq!(diff, cloned);
+
+        let debug_str = format!("{:?}", diff);
+        assert!(debug_str.contains("Hard"));
+    }
+
+    #[test]
+    fn test_task_result_clone() {
+        let result = TaskResult::success(
+            "task".to_string(),
+            "agent".to_string(),
+            1000,
+            "output".to_string(),
+            "logs".to_string(),
+        );
+
+        let cloned = result.clone();
+        assert_eq!(cloned.task_id, "task");
+        assert_eq!(cloned.passed, true);
+    }
 }
