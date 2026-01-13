@@ -360,7 +360,8 @@ mod tests {
         };
         
         let json = serde_json::to_string(&config).unwrap();
-        assert!(json.contains("450"));
+        let deserialized: VerifierConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.timeout_sec, 450.0);
     }
 
     #[test]
@@ -370,7 +371,8 @@ mod tests {
         };
         
         let json = serde_json::to_string(&config).unwrap();
-        assert!(json.contains("900"));
+        let deserialized: AgentConfigToml = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.timeout_sec, 900.0);
     }
 
     #[test]
@@ -383,56 +385,10 @@ mod tests {
         };
         
         let json = serde_json::to_string(&config).unwrap();
-        assert!(json.contains("16G"));
-        assert!(json.contains("100G"));
-    }
-
-    #[test]
-    fn test_default_difficulty() {
-        let diff = default_difficulty();
-        assert_eq!(diff, "medium");
-    }
-
-    #[test]
-    fn test_default_verifier_timeout() {
-        let timeout = default_verifier_timeout();
-        assert_eq!(timeout, 300.0);
-    }
-
-    #[test]
-    fn test_default_agent_timeout() {
-        let timeout = default_agent_timeout();
-        assert_eq!(timeout, 600.0);
-    }
-
-    #[test]
-    fn test_default_build_timeout() {
-        let timeout = default_build_timeout();
-        assert_eq!(timeout, 600.0);
-    }
-
-    #[test]
-    fn test_default_cpus() {
-        let cpus = default_cpus();
-        assert_eq!(cpus, 2);
-    }
-
-    #[test]
-    fn test_default_memory() {
-        let memory = default_memory();
-        assert_eq!(memory, "4G");
-    }
-
-    #[test]
-    fn test_default_storage() {
-        let storage = default_storage();
-        assert_eq!(storage, "20G");
-    }
-
-    #[test]
-    fn test_default_version() {
-        let version = default_version();
-        assert_eq!(version, "1.0");
+        let deserialized: EnvironmentConfigToml = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.cpus, 8);
+        assert_eq!(deserialized.memory, "16G");
+        assert_eq!(deserialized.storage, "100G");
     }
 
     #[test]

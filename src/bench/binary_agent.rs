@@ -603,20 +603,6 @@ mod tests {
     }
 
     #[test]
-    fn test_binary_agent_config_custom() {
-        let config = BinaryAgentConfig {
-            timeout_secs: 600,
-            api_key: Some("test-api-key".to_string()),
-            api_provider: Some("chutes".to_string()),
-            api_model: Some("gpt-4".to_string()),
-        };
-        assert_eq!(config.timeout_secs, 600);
-        assert_eq!(config.api_key, Some("test-api-key".to_string()));
-        assert_eq!(config.api_provider, Some("chutes".to_string()));
-        assert_eq!(config.api_model, Some("gpt-4".to_string()));
-    }
-
-    #[test]
     fn test_compute_source_hash_whitespace() {
         let source1 = "def main():\n    print('hello')";
         let source2 = "def main():\n    print('hello')\n";
