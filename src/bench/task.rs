@@ -244,6 +244,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_task_config_toml_defaults_when_fields_missing() {
+        // Only set version; omit nested tables entirely to test #[serde(default)]
+        let parsed: TaskConfig = toml::from_str(r#"version = "1.0""#).unwrap();
+        assert_eq!(parsed.version, "1.0");
+        assert_eq!(parsed.metadata.difficulty, "medium");
+        assert_eq!(parsed.verifier.timeout_sec, 300.0);
+        assert_eq!(parsed.agent.timeout_sec, 600.0);
+        assert_eq!(parsed.environment.cpus, 2);
+    }
+
+    #[test]
+    fn test_task_metadata_toml_default_difficulty_when_missing() {
+        // Test that difficulty defaults to "medium" when omitted in TOML
+        let parsed: TaskMetadata = toml::from_str(r#"author_name = "Test Author""#).unwrap();
+        assert_eq!(parsed.author_name, "Test Author");
+        assert_eq!(parsed.difficulty, "medium");
+    }
+
+    #[test]
     fn test_task_metadata_default() {
         let metadata = TaskMetadata::default();
         

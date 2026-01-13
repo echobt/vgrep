@@ -598,7 +598,7 @@ mod tests {
         let config = BinaryAgentConfig::default();
         assert_eq!(config.timeout_secs, 300);
         assert!(config.api_key.is_none());
-        assert_eq!(config.api_provider, Some("openrouter".to_string()));
+        assert_eq!(config.api_provider.as_deref(), Some("openrouter"));
         assert!(config.api_model.is_none());
     }
 
