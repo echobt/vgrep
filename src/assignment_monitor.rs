@@ -589,7 +589,7 @@ mod tests {
 
     #[test]
     fn test_validator_info_deserialization() {
-        let json_data = r#"{"hotkey": "val123", "stake": 10_000_000_000_000, "is_active": true}"#;
+        let json_data = r#"{"hotkey": "val123", "stake": 10000000000000, "is_active": true}"#;
         let info: ValidatorInfo = serde_json::from_str(json_data).unwrap();
         assert_eq!(info.hotkey, "val123");
         assert_eq!(info.stake, 10_000_000_000_000);
