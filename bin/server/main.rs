@@ -252,4 +252,3 @@ mod tests {
         assert!(debug_str.contains("platform_url"));
     }
 }
-

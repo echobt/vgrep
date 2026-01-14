@@ -313,10 +313,7 @@ mod tests {
     fn test_bridge_url_empty_path() {
         let client = TermClient::new("https://api.example.com");
         let url = client.bridge_url("");
-        assert_eq!(
-            url,
-            "https://api.example.com/api/v1/bridge/term-challenge/"
-        );
+        assert_eq!(url, "https://api.example.com/api/v1/bridge/term-challenge/");
     }
 
     #[test]

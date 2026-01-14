@@ -955,7 +955,10 @@ mod tests {
 
         let result = detect_entry_point(temp_dir.path(), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No entry point found"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No entry point found"));
     }
 
     #[test]
@@ -965,7 +968,7 @@ mod tests {
 
         let zip_data = create_zip_archive(temp_dir.path())?;
         assert!(!zip_data.is_empty());
-        
+
         // Verify it's a valid ZIP (starts with PK magic bytes)
         assert_eq!(&zip_data[0..2], b"PK");
         Ok(())
@@ -1000,18 +1003,28 @@ mod tests {
     fn test_create_zip_archive_excludes_hidden_files() -> Result<()> {
         let temp_dir = TempDir::new()?;
         fs::write(temp_dir.path().join("agent.py"), "# agent")?;
-        fs::write(temp_dir.path().join(".hidden"), "hidden content that should not be in archive")?;
+        fs::write(
+            temp_dir.path().join(".hidden"),
+            "hidden content that should not be in archive",
+        )?;
 
         let zip_data = create_zip_archive(temp_dir.path())?;
         assert!(!zip_data.is_empty());
-        
+
         // Verify hidden file is not included by extracting and checking
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_data))?;
         let file_names: Vec<String> = archive.file_names().map(String::from).collect();
-        
-        assert!(file_names.contains(&"agent.py".to_string()), "agent.py should be included");
-        assert!(!file_names.iter().any(|name| name.starts_with('.') || name.contains("/.")), 
-                "Hidden files should not be included");
+
+        assert!(
+            file_names.contains(&"agent.py".to_string()),
+            "agent.py should be included"
+        );
+        assert!(
+            !file_names
+                .iter()
+                .any(|name| name.starts_with('.') || name.contains("/.")),
+            "Hidden files should not be included"
+        );
         Ok(())
     }
 
@@ -1032,7 +1045,7 @@ mod tests {
     fn test_create_zip_archive_empty_directory() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let zip_data = create_zip_archive(temp_dir.path())?;
-        
+
         // Should still create a valid (empty) ZIP
         assert!(!zip_data.is_empty());
         assert_eq!(&zip_data[0..2], b"PK");
@@ -1080,7 +1093,7 @@ mod tests {
 
         let files = walkdir(temp_dir.path());
         assert_eq!(files.len(), 2);
-        
+
         let paths: Vec<_> = files.iter().map(|e| e.path()).collect();
         assert!(paths.iter().any(|p| p.ends_with("root.txt")));
         assert!(paths.iter().any(|p| p.ends_with("nested.txt")));
@@ -1138,7 +1151,7 @@ mod tests {
         fs::write(temp_dir.path().join("test.txt"), content)?;
 
         let zip_data = create_zip_archive(temp_dir.path())?;
-        
+
         // Unzip and verify content
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_data))?;
         let mut file = archive.by_name("test.txt")?;
