@@ -332,7 +332,7 @@ mod tests {
         assert!(bar.contains('░'));
         // Should have roughly 5 filled and 5 empty
         let filled_count = bar.matches('█').count();
-        assert!(filled_count >= 4 && filled_count <= 6);
+        assert!((4..=6).contains(&filled_count));
     }
 
     #[test]

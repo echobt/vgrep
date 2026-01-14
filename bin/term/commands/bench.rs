@@ -1012,7 +1012,7 @@ mod tests {
         assert!(!zip_data.is_empty());
 
         // Verify hidden file is not included by extracting and checking
-        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_data))?;
+        let archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_data))?;
         let file_names: Vec<String> = archive.file_names().map(String::from).collect();
 
         assert!(

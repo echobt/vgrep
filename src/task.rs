@@ -1503,7 +1503,7 @@ mod tests {
     #[test]
     fn test_difficulty_clone_and_debug() {
         let diff = Difficulty::Hard;
-        let cloned = diff.clone();
+        let cloned = diff;
         assert_eq!(diff, cloned);
 
         let debug_str = format!("{:?}", diff);
@@ -1522,6 +1522,6 @@ mod tests {
 
         let cloned = result.clone();
         assert_eq!(cloned.task_id, "task");
-        assert_eq!(cloned.passed, true);
+        assert!(cloned.passed);
     }
 }

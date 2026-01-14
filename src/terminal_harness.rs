@@ -1178,7 +1178,7 @@ mod tests {
 
     #[test]
     fn test_step_result_multiple_steps() {
-        let steps = vec![
+        let steps = [
             StepResult {
                 step: 1,
                 command: Some("pwd".to_string()),
