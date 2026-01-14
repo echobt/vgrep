@@ -166,6 +166,32 @@ impl<S: AssignmentStorage> AssignmentMonitor<S> {
             let short_validator =
                 &assignment.validator_hotkey[..16.min(assignment.validator_hotkey.len())];
 
+            // Determine reason: no activity vs stuck mid-evaluation
+            let (reason, reason_detail) = if assignment.tasks_completed == 0 {
+                ("no_activity", "no tasks started".to_string())
+            } else {
+                (
+                    "stuck",
+                    format!(
+                        "{} tasks done, last activity {}s ago",
+                        assignment.tasks_completed,
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64 - assignment.last_task_at)
+                            .unwrap_or(0)
+                    ),
+                )
+            };
+
+            info!(
+                "Detected stale validator {} for agent {}: {} (reassignment #{}/{})",
+                short_validator,
+                short_hash,
+                reason_detail,
+                assignment.reassignment_count,
+                self.config.max_reassignments
+            );
+
             // Skip if max reassignments reached (shouldn't happen due to query filter, but safety check)
             if assignment.reassignment_count >= self.config.max_reassignments {
                 warn!(
@@ -203,23 +229,24 @@ impl<S: AssignmentStorage> AssignmentMonitor<S> {
 
             let short_new = &new_validator[..16.min(new_validator.len())];
 
-            // Perform the reassignment
+            // Perform the reassignment (only transfers incomplete tasks, keeps completed work)
             match self
                 .storage
                 .reassign_validator(
                     &assignment.agent_hash,
                     &assignment.validator_hotkey,
                     &new_validator,
-                    "timeout",
+                    reason,
                 )
                 .await
             {
                 Ok(_) => {
                     info!(
-                        "Reassigned agent {} from stale validator {} to {} (reassignment #{}/{})",
+                        "Reassigned agent {} from {} to {} (reason: {}, reassignment #{}/{})",
                         short_hash,
                         short_validator,
                         short_new,
+                        reason,
                         assignment.reassignment_count + 1,
                         self.config.max_reassignments
                     );
@@ -396,6 +423,27 @@ mod tests {
             validator_hotkey: validator.to_string(),
             assigned_at: 0,
             reassignment_count,
+            tasks_completed: 0,
+            last_task_at: 0,
+        }
+    }
+
+    fn sample_stuck_assignment(
+        agent_hash: &str,
+        validator: &str,
+        reassignment_count: i32,
+        tasks_completed: i32,
+    ) -> StaleAssignment {
+        StaleAssignment {
+            agent_hash: agent_hash.to_string(),
+            validator_hotkey: validator.to_string(),
+            assigned_at: 0,
+            reassignment_count,
+            tasks_completed,
+            last_task_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64 - 4 * 3600) // 4 hours ago
+                .unwrap_or(0),
         }
     }
 
@@ -511,7 +559,7 @@ mod tests {
         assert_eq!(records[0].0, "agent_a");
         assert_eq!(records[0].1, "validator_a");
         assert_eq!(records[0].2, "validator_b");
-        assert_eq!(records[0].3, "timeout");
+        assert_eq!(records[0].3, "no_activity"); // Changed from "timeout" - now uses specific reason
     }
 
     #[tokio::test]
@@ -612,6 +660,18 @@ mod tests {
         assert_eq!(assignment.validator_hotkey, "validator_456");
         assert_eq!(assignment.reassignment_count, 1);
         assert_eq!(assignment.assigned_at, 0);
+        assert_eq!(assignment.tasks_completed, 0);
+        assert_eq!(assignment.last_task_at, 0);
+    }
+
+    #[test]
+    fn test_stuck_assignment_sample() {
+        let assignment = sample_stuck_assignment("agent_hash_456", "validator_789", 2, 8);
+        assert_eq!(assignment.agent_hash, "agent_hash_456");
+        assert_eq!(assignment.validator_hotkey, "validator_789");
+        assert_eq!(assignment.reassignment_count, 2);
+        assert_eq!(assignment.tasks_completed, 8);
+        assert!(assignment.last_task_at > 0); // Should be set to 4 hours ago
     }
 
     #[tokio::test]

@@ -119,7 +119,7 @@ CREATE TABLE IF NOT EXISTS pending_evaluations (
     validators_completed INTEGER NOT NULL DEFAULT 0,
     total_validators INTEGER NOT NULL DEFAULT 0,
     window_started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    window_expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '6 hours'),
+    window_expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '24 hours'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -128,7 +128,7 @@ CREATE INDEX IF NOT EXISTS idx_pending_agent ON pending_evaluations(agent_hash);
 CREATE INDEX IF NOT EXISTS idx_pending_window ON pending_evaluations(window_expires_at);
 
 -- Validator evaluations: ONE evaluation per validator per agent
--- ALL validators must evaluate each agent (except late ones after 6h)
+-- ALL validators must evaluate each agent (except late ones after 24h)
 CREATE TABLE IF NOT EXISTS validator_evaluations (
     id TEXT PRIMARY KEY,
     agent_hash TEXT NOT NULL,
@@ -543,13 +543,17 @@ pub struct LlmUsageRecord {
     pub cost_usd: f64,
 }
 
-/// Stale validator assignment (no task started within timeout)
+/// Stale validator assignment (no task started within timeout, or stuck mid-evaluation)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StaleAssignment {
     pub agent_hash: String,
     pub validator_hotkey: String,
     pub assigned_at: i64,
     pub reassignment_count: i32,
+    /// Number of tasks completed by this validator for this agent
+    pub tasks_completed: i32,
+    /// Timestamp of last task completion (0 if no tasks completed)
+    pub last_task_at: i64,
 }
 
 /// Reassignment history record for audit logging
@@ -1621,7 +1625,7 @@ impl PgStorage {
                 total_validators = EXCLUDED.total_validators,
                 validators_completed = 0,
                 window_started_at = NOW(),
-                window_expires_at = NOW() + INTERVAL '6 hours',
+                window_expires_at = NOW() + INTERVAL '24 hours',
                 status = CASE WHEN pending_evaluations.status = 'completed' THEN pending_evaluations.status ELSE 'pending' END",
             &[&id, &submission_id, &agent_hash, &miner_hotkey, &epoch, &actual_validators],
         ).await?;
@@ -1850,12 +1854,15 @@ impl PgStorage {
         Ok(rows.iter().map(|r| r.get(0)).collect())
     }
 
-    /// Get stale validator assignments (no task_logs after timeout)
+    /// Get stale validator assignments (no activity or stuck mid-evaluation)
     /// Returns assignments where:
-    /// 1. No task_logs exist for this agent+validator combination
-    /// 2. Assignment is older than timeout_minutes
+    /// 1. Assignment is pending (not cancelled/completed)
+    /// 2. Validator hasn't completed their evaluation yet
     /// 3. Agent has compile_status = 'success'
     /// 4. Reassignment count is less than max_reassignments
+    /// 5. Either:
+    ///    a. No task_logs AND assigned > timeout_minutes ago, OR
+    ///    b. Has task_logs but last one was > 3 hours ago (stuck mid-evaluation)
     pub async fn get_stale_assignments(
         &self,
         timeout_minutes: i64,
@@ -1863,22 +1870,49 @@ impl PgStorage {
     ) -> Result<Vec<StaleAssignment>> {
         let client = self.pool.get().await?;
 
+        // Hardcoded stuck threshold: 3 hours for validators who started but got stuck
+        const STUCK_THRESHOLD_HOURS: i32 = 3;
+
         let rows = client
             .query(
                 "SELECT 
                     va.agent_hash,
                     va.validator_hotkey,
                     EXTRACT(EPOCH FROM va.assigned_at)::BIGINT as assigned_at,
-                    COALESCE(s.reassignment_count, 0) as reassignment_count
+                    COALESCE(s.reassignment_count, 0) as reassignment_count,
+                    COALESCE(task_stats.tasks_done, 0) as tasks_completed,
+                    COALESCE(EXTRACT(EPOCH FROM task_stats.last_task)::BIGINT, 0) as last_task_at
                 FROM validator_assignments va
                 JOIN submissions s ON s.agent_hash = va.agent_hash
-                LEFT JOIN task_logs tl ON tl.agent_hash = va.agent_hash 
-                                      AND tl.validator_hotkey = va.validator_hotkey
-                WHERE tl.id IS NULL
-                  AND va.assigned_at < NOW() - ($1 || ' minutes')::INTERVAL
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*)::INT as tasks_done, MAX(completed_at) as last_task
+                    FROM task_logs tl 
+                    WHERE tl.agent_hash = va.agent_hash 
+                      AND tl.validator_hotkey = va.validator_hotkey
+                ) task_stats ON true
+                WHERE va.status = 'pending'
                   AND s.compile_status = 'success'
-                  AND COALESCE(s.reassignment_count, 0) < $2",
-                &[&timeout_minutes.to_string(), &max_reassignments],
+                  AND COALESCE(s.reassignment_count, 0) < $2
+                  -- Validator hasn't completed their evaluation yet
+                  AND NOT EXISTS (
+                      SELECT 1 FROM validator_evaluations ve 
+                      WHERE ve.agent_hash = va.agent_hash 
+                        AND ve.validator_hotkey = va.validator_hotkey
+                  )
+                  -- Either: no activity AND assigned > timeout_minutes ago
+                  -- Or: has activity but last task > 3 hours ago (stuck)
+                  AND (
+                      (COALESCE(task_stats.tasks_done, 0) = 0 
+                       AND va.assigned_at < NOW() - ($1 || ' minutes')::INTERVAL)
+                      OR
+                      (COALESCE(task_stats.tasks_done, 0) > 0 
+                       AND task_stats.last_task < NOW() - make_interval(hours => $3))
+                  )",
+                &[
+                    &timeout_minutes.to_string(),
+                    &max_reassignments,
+                    &STUCK_THRESHOLD_HOURS,
+                ],
             )
             .await?;
 
@@ -1889,6 +1923,8 @@ impl PgStorage {
                 validator_hotkey: r.get(1),
                 assigned_at: r.get(2),
                 reassignment_count: r.get(3),
+                tasks_completed: r.get(4),
+                last_task_at: r.get(5),
             })
             .collect();
 
@@ -1896,8 +1932,9 @@ impl PgStorage {
     }
 
     /// Reassign an agent from one validator to another
-    /// 1. Transfers evaluation_tasks from old to new validator
-    /// 2. Deletes old assignment
+    /// Option B: Only transfers INCOMPLETE tasks (keeps completed task_logs from old validator)
+    /// 1. Transfers only incomplete evaluation_tasks from old to new validator
+    /// 2. Marks old assignment as cancelled (keeps record)
     /// 3. Creates new assignment
     /// 4. Increments reassignment_count in submissions
     /// 5. Records the reassignment in history table
@@ -1911,22 +1948,30 @@ impl PgStorage {
         let mut client = self.pool.get().await?;
         let transaction = client.transaction().await?;
 
-        let transaction_id = uuid::Uuid::new_v4().to_string();
+        let _transaction_id = uuid::Uuid::new_v4().to_string();
 
-        // 1. Transfer evaluation_tasks from old validator to new validator
+        // 1. Transfer only INCOMPLETE evaluation_tasks from old validator to new validator
+        // Tasks that have a task_log entry are considered complete and stay with old validator
         let tasks_transferred = transaction
             .execute(
-                "UPDATE evaluation_tasks 
+                "UPDATE evaluation_tasks et
                  SET validator_hotkey = $3 
-                 WHERE agent_hash = $1 AND validator_hotkey = $2",
+                 WHERE et.agent_hash = $1 
+                   AND et.validator_hotkey = $2
+                   AND NOT EXISTS (
+                       SELECT 1 FROM task_logs tl
+                       WHERE tl.agent_hash = et.agent_hash
+                         AND tl.validator_hotkey = et.validator_hotkey
+                         AND tl.task_id = et.task_id
+                   )",
                 &[&agent_hash, &old_validator, &new_validator],
             )
             .await?;
 
-        // 2. Delete old assignment
+        // 2. Mark old assignment as cancelled (keep record for audit)
         transaction
             .execute(
-                "DELETE FROM validator_assignments WHERE agent_hash = $1 AND validator_hotkey = $2",
+                "UPDATE validator_assignments SET status = 'cancelled' WHERE agent_hash = $1 AND validator_hotkey = $2",
                 &[&agent_hash, &old_validator],
             )
             .await?;
@@ -1976,13 +2021,12 @@ impl PgStorage {
         transaction.commit().await?;
 
         info!(
-            "Reassigned agent {} from {} to {} (reassignment #{}, {} tasks transferred), tx={}",
+            "Reassigned agent {} from {} to {} (reassignment #{}, {} incomplete tasks transferred)",
             &agent_hash[..16.min(agent_hash.len())],
             &old_validator[..16.min(old_validator.len())],
             &new_validator[..16.min(new_validator.len())],
             reassignment_number,
-            tasks_transferred,
-            &transaction_id[..8]
+            tasks_transferred
         );
 
         Ok(())
@@ -2476,14 +2520,13 @@ impl PgStorage {
             }
         };
 
-        // If window expired, don't allow completion
+        // Log if window expired but still accept the completion (don't waste work)
         if is_expired {
             info!(
-                "Validator {} is late for agent {} (window expired), skipping auto-completion",
+                "Validator {} completing late for agent {} (window expired) - accepting anyway to preserve work",
                 short_validator, short_hash
             );
-            transaction.rollback().await?;
-            return Ok((false, None));
+            // Continue processing - don't reject completed work
         }
 
         // Check if this validator already has an evaluation (avoid double-counting)
@@ -3102,9 +3145,16 @@ impl PgStorage {
                     total_validators,
                     min_required
                 );
+                // Update both pending_evaluations and submissions status
                 client
                     .execute(
                         "UPDATE pending_evaluations SET status = 'expired' WHERE agent_hash = $1",
+                        &[&agent_hash],
+                    )
+                    .await?;
+                client
+                    .execute(
+                        "UPDATE submissions SET status = 'expired' WHERE agent_hash = $1 AND status = 'pending'",
                         &[&agent_hash],
                     )
                     .await?;
@@ -3185,10 +3235,44 @@ impl PgStorage {
         Ok(result)
     }
 
+    /// Sync validators_completed counter with actual count in validator_evaluations
+    /// Fixes any drift between the counter and actual evaluation count
+    pub async fn sync_validators_completed(&self) -> Result<u64> {
+        let client = self.pool.get().await?;
+
+        let result = client
+            .execute(
+                "UPDATE pending_evaluations pe
+                 SET validators_completed = (
+                     SELECT COUNT(*)::INT FROM validator_evaluations ve 
+                     WHERE ve.agent_hash = pe.agent_hash
+                 )
+                 WHERE pe.status != 'completed'
+                   AND pe.validators_completed != (
+                       SELECT COUNT(*)::INT FROM validator_evaluations ve 
+                       WHERE ve.agent_hash = pe.agent_hash
+                   )",
+                &[],
+            )
+            .await?;
+
+        if result > 0 {
+            info!("Synced validators_completed counter for {} agents", result);
+        }
+
+        Ok(result)
+    }
+
     /// Run all periodic maintenance tasks
+    /// - Sync validators_completed counters
     /// - Expire old evaluation windows
     /// - Cleanup stale claims (1 hour timeout)
     pub async fn run_maintenance(&self) -> Result<()> {
+        // Sync validators_completed counters with actual count
+        if let Err(e) = self.sync_validators_completed().await {
+            warn!("Failed to sync validators_completed: {:?}", e);
+        }
+
         // Cleanup stale claims (1 hour timeout)
         if let Err(e) = self.cleanup_stale_claims(60).await {
             warn!("Failed to cleanup stale claims: {:?}", e);
