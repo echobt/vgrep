@@ -3095,6 +3095,7 @@ fn estimate_model_pricing(model: &str) -> (f64, f64) {
 }
 
 /// Make actual LLM API call
+#[allow(clippy::too_many_arguments)]
 async fn make_llm_request(
     api_key: &str,
     provider: &str,

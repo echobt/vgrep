@@ -216,8 +216,11 @@ impl<S: AssignmentStorage> AssignmentMonitor<S> {
 
             // Assign as many validators as needed
             let validators_to_assign = agent.validators_needed.min(available.len() as i32);
-            for i in 0..validators_to_assign as usize {
-                let new_validator = available[i];
+            for (i, new_validator) in available
+                .iter()
+                .take(validators_to_assign as usize)
+                .enumerate()
+            {
                 let short_validator = &new_validator[..16.min(new_validator.len())];
 
                 match self
