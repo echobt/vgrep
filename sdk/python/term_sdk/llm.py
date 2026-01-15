@@ -721,6 +721,129 @@ class LLM:
         
         return data
     
+    def raw_chat(
+        self,
+        body: Dict[str, Any],
+        model: Optional[str] = None,
+    ) -> LLMResponse:
+        """Send a raw chat request with full control over the body.
+        
+        This method sends the body exactly as provided to the LLM API,
+        without any transformation. Useful when you need precise control
+        over message format, tool_calls, etc.
+        
+        The body is sent through the platform bridge in evaluation mode,
+        or directly to the provider API otherwise.
+        
+        Args:
+            body: Complete request body dict. Should include:
+                  - model: Model name
+                  - messages: List of message dicts
+                  - Any other parameters (tools, temperature, etc.)
+            model: Optional model override (if not in body)
+        
+        Returns:
+            LLMResponse with parsed content and function_calls
+        
+        Example:
+            ```python
+            response = llm.raw_chat({
+                "model": "anthropic/claude-3.5-sonnet",
+                "messages": [
+                    {"role": "system", "content": "You are helpful."},
+                    {"role": "user", "content": "Hello"},
+                    {"role": "assistant", "content": "", "tool_calls": [...]},
+                    {"role": "tool", "tool_call_id": "...", "content": "..."}
+                ],
+                "tools": [...],
+                "temperature": 0.7,
+                "max_tokens": 4096
+            })
+            ```
+        """
+        start = time.time()
+        actual_model = model or body.get("model") or self.default_model
+        
+        if self._use_platform_bridge:
+            # Send through platform bridge with raw_request flag
+            proxy_payload = {
+                "agent_hash": self._agent_hash,
+                "messages": body.get("messages", []),
+                "model": actual_model,
+                "max_tokens": body.get("max_tokens", self.max_tokens),
+                "temperature": body.get("temperature", self.temperature),
+                "task_id": os.environ.get("TERM_TASK_ID"),
+                "extra_params": {
+                    k: v for k, v in body.items() 
+                    if k not in ("messages", "model", "max_tokens", "temperature")
+                },
+            }
+            
+            headers = {"Content-Type": "application/json"}
+            if self._api_key:
+                headers["Authorization"] = f"Bearer {self._api_key}"
+            
+            try:
+                response = self._client.post(self._api_url, headers=headers, json=proxy_payload)
+            except httpx.RequestError as e:
+                raise LLMError(
+                    code="proxy_unavailable",
+                    message=f"Raw chat through proxy failed: {e}",
+                    details={"proxy_url": self._api_url}
+                )
+            
+            if not response.is_success:
+                try:
+                    data = response.json()
+                    error_msg = data.get("error", response.text)
+                except Exception:
+                    error_msg = response.text
+                
+                error_str = str(error_msg).lower()
+                if "cost_limit_exceeded" in error_str or "cost limit" in error_str:
+                    import re
+                    limit, used = 0.0, 0.0
+                    match = re.search(r'\$?([\d.]+)\s*used\s*of\s*\$?([\d.]+)', error_str)
+                    if match:
+                        used = float(match.group(1))
+                        limit = float(match.group(2))
+                    raise CostLimitExceeded(message=str(error_msg), limit=limit, used=used)
+                
+                raise LLMError(
+                    code="proxy_error",
+                    message=f"Raw chat error: {error_msg}",
+                    details={"status_code": response.status_code}
+                )
+            
+            data = response.json()
+            return self._parse_platform_response(data, actual_model, start)
+        
+        else:
+            # Direct API call with raw body
+            headers = {
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            }
+            
+            # Ensure model is in body
+            if "model" not in body:
+                body["model"] = actual_model
+            
+            try:
+                response = self._client.post(self._api_url, headers=headers, json=body)
+            except httpx.RequestError as e:
+                raise LLMError(
+                    code="request_failed",
+                    message=f"Raw chat request failed: {e}",
+                    details={"url": self._api_url}
+                )
+            
+            if not response.is_success:
+                self._handle_api_error(response, actual_model)
+            
+            data = response.json()
+            return self._parse_response(data, actual_model, start)
+    
     def _chat_anthropic(
         self,
         messages: List[Dict[str, str]],
