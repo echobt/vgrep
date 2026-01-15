@@ -566,6 +566,14 @@ pub struct AgentNeedingValidators {
     pub reassignment_count: i32,
 }
 
+/// Validator assignment without corresponding tasks (mismatch)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorWithoutTasks {
+    pub agent_hash: String,
+    pub validator_hotkey: String,
+    pub assigned_at: i64,
+}
+
 /// Reassignment history record for audit logging
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReassignmentHistory {
@@ -1988,6 +1996,7 @@ impl PgStorage {
     }
 
     /// Assign a new validator to an agent (for filling missing validator slots)
+    /// If all tasks are already assigned, redistributes tasks from validators with the most tasks
     pub async fn assign_additional_validator(
         &self,
         agent_hash: &str,
@@ -1997,6 +2006,8 @@ impl PgStorage {
         let transaction = client.transaction().await?;
 
         let new_id = uuid::Uuid::new_v4().to_string();
+        let short_hash = &agent_hash[..16.min(agent_hash.len())];
+        let short_validator = &validator_hotkey[..16.min(validator_hotkey.len())];
 
         // Create validator assignment
         transaction
@@ -2008,9 +2019,8 @@ impl PgStorage {
             )
             .await?;
 
-        // Assign unassigned tasks to this validator
-        // Get tasks that don't have a validator assigned
-        transaction
+        // First, try to assign unassigned tasks (tasks with NULL validator_hotkey)
+        let unassigned_result = transaction
             .execute(
                 "UPDATE evaluation_tasks 
                  SET validator_hotkey = $2
@@ -2020,14 +2030,94 @@ impl PgStorage {
             )
             .await?;
 
+        if unassigned_result > 0 {
+            // Successfully assigned unassigned tasks
+            transaction.commit().await?;
+            info!(
+                "Assigned {} unassigned tasks to validator {} for agent {}",
+                unassigned_result, short_validator, short_hash
+            );
+            return Ok(());
+        }
+
+        // All tasks are already assigned - need to redistribute
+        // Count total tasks and validators (including the new one)
+        let task_count: i64 = transaction
+            .query_one(
+                "SELECT COUNT(*) FROM evaluation_tasks WHERE agent_hash = $1",
+                &[&agent_hash],
+            )
+            .await?
+            .get(0);
+
+        let validator_count: i64 = transaction
+            .query_one(
+                "SELECT COUNT(DISTINCT validator_hotkey) + 1 FROM evaluation_tasks WHERE agent_hash = $1",
+                &[&agent_hash],
+            )
+            .await?
+            .get(0);
+
+        if task_count == 0 || validator_count <= 1 {
+            // No tasks to redistribute or only one validator
+            transaction.commit().await?;
+            warn!(
+                "No tasks to redistribute for agent {} (tasks: {}, validators: {})",
+                short_hash, task_count, validator_count
+            );
+            return Ok(());
+        }
+
+        // Calculate how many tasks the new validator should get
+        let tasks_per_validator = task_count / validator_count;
+        if tasks_per_validator == 0 {
+            transaction.commit().await?;
+            warn!(
+                "Not enough tasks to redistribute for agent {} (tasks: {}, validators: {})",
+                short_hash, task_count, validator_count
+            );
+            return Ok(());
+        }
+
+        // Redistribute tasks: take from validators with the most tasks
+        // Select tasks to reassign (from validators with most tasks, excluding completed ones)
+        let redistributed = transaction
+            .execute(
+                "UPDATE evaluation_tasks 
+                 SET validator_hotkey = $2
+                 WHERE id IN (
+                     SELECT et.id
+                     FROM evaluation_tasks et
+                     LEFT JOIN task_logs tl ON tl.agent_hash = et.agent_hash 
+                         AND tl.task_id = et.task_id 
+                         AND tl.validator_hotkey = et.validator_hotkey
+                     WHERE et.agent_hash = $1
+                       AND et.validator_hotkey != $2
+                       AND tl.id IS NULL  -- Not yet completed
+                     ORDER BY (
+                         SELECT COUNT(*) FROM evaluation_tasks et2 
+                         WHERE et2.agent_hash = et.agent_hash 
+                         AND et2.validator_hotkey = et.validator_hotkey
+                     ) DESC, random()
+                     LIMIT $3
+                 )",
+                &[&agent_hash, &validator_hotkey, &tasks_per_validator],
+            )
+            .await?;
+
         transaction.commit().await?;
 
-        let short_hash = &agent_hash[..16.min(agent_hash.len())];
-        let short_validator = &validator_hotkey[..16.min(validator_hotkey.len())];
-        info!(
-            "Assigned additional validator {} to agent {}",
-            short_validator, short_hash
-        );
+        if redistributed > 0 {
+            info!(
+                "Redistributed {} tasks to new validator {} for agent {}",
+                redistributed, short_validator, short_hash
+            );
+        } else {
+            warn!(
+                "Could not redistribute tasks to validator {} for agent {} (all tasks may be completed)",
+                short_validator, short_hash
+            );
+        }
 
         Ok(())
     }
@@ -3383,6 +3473,7 @@ impl PgStorage {
     /// - Sync validators_completed counters
     /// - Expire old evaluation windows
     /// - Cleanup stale claims (1 hour timeout)
+    /// - Fix validators without tasks
     pub async fn run_maintenance(&self) -> Result<()> {
         // Sync validators_completed counters with actual count
         if let Err(e) = self.sync_validators_completed().await {
@@ -3399,7 +3490,127 @@ impl PgStorage {
             warn!("Failed to expire old windows: {:?}", e);
         }
 
+        // Fix validators assigned but without tasks
+        if let Err(e) = self.fix_validators_without_tasks().await {
+            warn!("Failed to fix validators without tasks: {:?}", e);
+        }
+
         Ok(())
+    }
+
+    /// Find validators that are assigned to agents but have no tasks in evaluation_tasks
+    /// This can happen when validators are added after initial task assignment
+    pub async fn get_validators_without_tasks(&self) -> Result<Vec<ValidatorWithoutTasks>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT va.agent_hash, va.validator_hotkey, 
+                        EXTRACT(EPOCH FROM va.assigned_at)::BIGINT
+                 FROM validator_assignments va
+                 JOIN submissions s ON s.agent_hash = va.agent_hash
+                 WHERE va.status = 'pending'
+                   AND s.status = 'pending'
+                   AND s.compile_status = 'success'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM evaluation_tasks et 
+                       WHERE et.agent_hash = va.agent_hash 
+                       AND et.validator_hotkey = va.validator_hotkey
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM validator_evaluations ve
+                       WHERE ve.agent_hash = va.agent_hash
+                       AND ve.validator_hotkey = va.validator_hotkey
+                   )",
+                &[],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| ValidatorWithoutTasks {
+                agent_hash: r.get(0),
+                validator_hotkey: r.get(1),
+                assigned_at: r.get(2),
+            })
+            .collect())
+    }
+
+    /// Fix validators that have no tasks assigned by either:
+    /// 1. Redistributing tasks from other validators
+    /// 2. Removing the invalid assignment if redistribution fails
+    pub async fn fix_validators_without_tasks(&self) -> Result<usize> {
+        let mismatched = self.get_validators_without_tasks().await?;
+
+        if mismatched.is_empty() {
+            return Ok(0);
+        }
+
+        info!(
+            "Found {} validators without tasks, attempting to fix...",
+            mismatched.len()
+        );
+
+        let mut fixed = 0;
+        for item in mismatched {
+            let short_hash = &item.agent_hash[..16.min(item.agent_hash.len())];
+            let short_validator = &item.validator_hotkey[..16.min(item.validator_hotkey.len())];
+
+            // Try to redistribute tasks to this validator
+            match self
+                .assign_additional_validator(&item.agent_hash, &item.validator_hotkey)
+                .await
+            {
+                Ok(_) => {
+                    // Check if tasks were actually assigned
+                    let tasks: i64 = self
+                        .pool
+                        .get()
+                        .await?
+                        .query_one(
+                            "SELECT COUNT(*) FROM evaluation_tasks 
+                             WHERE agent_hash = $1 AND validator_hotkey = $2",
+                            &[&item.agent_hash, &item.validator_hotkey],
+                        )
+                        .await?
+                        .get(0);
+
+                    if tasks > 0 {
+                        info!(
+                            "Fixed validator {} for agent {}: assigned {} tasks",
+                            short_validator, short_hash, tasks
+                        );
+                        fixed += 1;
+                    } else {
+                        // Redistribution failed, remove the invalid assignment
+                        warn!(
+                            "Could not assign tasks to validator {} for agent {}, removing assignment",
+                            short_validator, short_hash
+                        );
+                        let client = self.pool.get().await?;
+                        client
+                            .execute(
+                                "DELETE FROM validator_assignments 
+                                 WHERE agent_hash = $1 AND validator_hotkey = $2",
+                                &[&item.agent_hash, &item.validator_hotkey],
+                            )
+                            .await?;
+                        fixed += 1; // Still counts as fixed (removed invalid state)
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to fix validator {} for agent {}: {}",
+                        short_validator, short_hash, e
+                    );
+                }
+            }
+        }
+
+        if fixed > 0 {
+            info!("Fixed {} validators without tasks", fixed);
+        }
+
+        Ok(fixed)
     }
 
     /// Get all pending evaluations (for status endpoint)
