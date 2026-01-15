@@ -814,7 +814,11 @@ struct WsBrokerContainerHandle {
 }
 
 impl WsBrokerContainerHandle {
-    async fn send_request(&self, request: &BrokerRequest) -> Result<BrokerResponse> {
+    async fn send_request(
+        &self,
+        request: &BrokerRequest,
+        timeout_secs: Option<u64>,
+    ) -> Result<BrokerResponse> {
         use futures::{SinkExt, StreamExt};
         use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
@@ -845,8 +849,9 @@ impl WsBrokerContainerHandle {
         );
         write.send(Message::Text(request_json)).await?;
 
-        // Wait for response with timeout for large transfers
-        let response_timeout = std::time::Duration::from_secs(120);
+        // Wait for response with timeout - use provided timeout or default to 300s
+        let timeout = timeout_secs.unwrap_or(300);
+        let response_timeout = std::time::Duration::from_secs(timeout);
         match tokio::time::timeout(response_timeout, read.next()).await {
             Ok(Some(Ok(Message::Text(text)))) => {
                 debug!("Received response: {} bytes", text.len());
@@ -865,7 +870,7 @@ impl WsBrokerContainerHandle {
                 bail!("Connection closed by broker")
             }
             Err(_) => {
-                bail!("Timeout waiting for response (120s)")
+                bail!("Timeout waiting for response ({}s)", timeout)
             }
         }
     }
@@ -887,7 +892,7 @@ impl ContainerHandle for WsBrokerContainerHandle {
             request_id: Self::request_id(),
         };
 
-        match self.send_request(&request).await? {
+        match self.send_request(&request, None).await? {
             BrokerResponse::Started { .. } => {
                 // Return container name as endpoint for Docker DNS resolution
                 Ok(Some(self.container_name.clone()))
@@ -904,7 +909,7 @@ impl ContainerHandle for WsBrokerContainerHandle {
             request_id: Self::request_id(),
         };
 
-        match self.send_request(&request).await? {
+        match self.send_request(&request, None).await? {
             BrokerResponse::Stopped { .. } => Ok(()),
             BrokerResponse::Error { error, .. } => bail!("Stop failed: {}", error),
             _ => bail!("Unexpected response"),
@@ -918,7 +923,7 @@ impl ContainerHandle for WsBrokerContainerHandle {
             request_id: Self::request_id(),
         };
 
-        match self.send_request(&request).await? {
+        match self.send_request(&request, None).await? {
             BrokerResponse::Removed { .. } => Ok(()),
             BrokerResponse::Error { error, .. } => bail!("Remove failed: {}", error),
             _ => bail!("Unexpected response"),
@@ -938,7 +943,7 @@ impl ContainerHandle for WsBrokerContainerHandle {
             request_id: Self::request_id(),
         };
 
-        match self.send_request(&request).await? {
+        match self.send_request(&request, Some(timeout_secs + 30)).await? {
             BrokerResponse::ExecResult { result, .. } => Ok(ExecOutput {
                 stdout: result.stdout,
                 stderr: result.stderr,
@@ -956,7 +961,7 @@ impl ContainerHandle for WsBrokerContainerHandle {
             request_id: Self::request_id(),
         };
 
-        match self.send_request(&request).await? {
+        match self.send_request(&request, None).await? {
             BrokerResponse::LogsResult { logs, .. } => Ok(logs),
             BrokerResponse::Error { error, .. } => bail!("Logs failed: {}", error),
             _ => bail!("Unexpected response"),
@@ -975,7 +980,7 @@ impl ContainerHandle for WsBrokerContainerHandle {
             request_id: Self::request_id(),
         };
 
-        match self.send_request(&request).await? {
+        match self.send_request(&request, None).await? {
             BrokerResponse::CopyToResult { .. } => Ok(()),
             BrokerResponse::Error { error, .. } => bail!("CopyTo failed: {}", error),
             _ => bail!("Unexpected response for CopyTo"),
@@ -997,7 +1002,7 @@ impl ContainerHandle for WsBrokerContainerHandle {
         };
 
         let response = self
-            .send_request(&request)
+            .send_request(&request, None)
             .await
             .map_err(|e| anyhow::anyhow!("CopyFrom request failed: {}", e))?;
 

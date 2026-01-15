@@ -1275,10 +1275,30 @@ impl ValidatorWorker {
                     duration_ms: (global_timeout_secs * 1000) as i64,
                     error: Some("global_timeout".to_string()),
                     agent_stderr: Some(format!(
-                        "Task exceeded global timeout of {}s (agent: {}s * 2, test: {}s, buffer: 30s). Container force-killed.",
-                        global_timeout_secs, timeout_secs, test_timeout_secs
+                        "Task exceeded global timeout of {}s. Container was force-killed.\n\
+                         Breakdown: agent_timeout={}s × 2 attempts + test_timeout={}s + buffer=30s\n\
+                         Agent hash: {}\n\
+                         Task ID: {}",
+                        global_timeout_secs, timeout_secs, test_timeout_secs, agent_hash, task_id
                     )),
-                    test_output: Some("Global timeout - container was force-killed".to_string()),
+                    test_output: Some(format!(
+                        "GLOBAL TIMEOUT - Container force-killed after {}s\n\
+                         The task exceeded the maximum allowed execution time.\n\
+                         Timeout breakdown:\n\
+                         - Agent execution: {}s × 2 attempts = {}s\n\
+                         - Test execution: {}s\n\
+                         - Buffer: 30s\n\
+                         - Total max: {}s\n\n\
+                         This can happen when:\n\
+                         - Agent gets stuck in an infinite loop\n\
+                         - Commands take too long to execute\n\
+                         - Test script hangs\n\n\
+                         The container and all processes were terminated.",
+                        global_timeout_secs,
+                        timeout_secs, timeout_secs * 2,
+                        test_timeout_secs,
+                        global_timeout_secs
+                    )),
                     steps_executed: Some(0),
                     timed_out: true,
                 });

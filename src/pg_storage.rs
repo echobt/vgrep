@@ -5139,9 +5139,11 @@ impl PgStorage {
                     COALESCE(tl.retry_count, 0) as retry_count,
                     EXTRACT(EPOCH FROM tl.completed_at)::BIGINT as completed_at
                 FROM task_logs tl
-                WHERE (tl.error LIKE '%timeout%' 
-                       OR tl.test_output LIKE '%timed out%'
-                       OR tl.test_output LIKE '%did not complete%')
+                WHERE (tl.error ILIKE '%timeout%' 
+                       OR tl.test_output ILIKE '%timeout%'
+                       OR tl.test_output ILIKE '%timed out%'
+                       OR tl.test_output ILIKE '%did not complete%'
+                       OR tl.test_output ILIKE '%force%kill%')
                   AND COALESCE(tl.retry_count, 0) < $1
                   AND tl.passed = false
                 ORDER BY tl.completed_at ASC
