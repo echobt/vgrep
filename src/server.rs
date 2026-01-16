@@ -1750,6 +1750,9 @@ pub async fn run_server_with_mode(
             .route("/pending", get(api::get_pending_submissions))
             .route("/assignments", get(api::get_all_assignments))
             .route("/assignments/:agent_hash", get(api::get_agent_assignments))
+            // Checkpoint endpoints
+            .route("/checkpoints", get(api::list_checkpoints))
+            .route("/checkpoints/:checkpoint_id", get(api::get_checkpoint))
             .layer(cors.clone()) // Use same CORS config as main routes
             .with_state(api_state);
 
