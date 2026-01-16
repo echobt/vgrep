@@ -108,6 +108,9 @@ pub struct ValidatorWorker {
     /// Assigned task IDs per agent (agent_hash -> task_ids)
     /// Each validator gets a subset of tasks (10 out of 30)
     assigned_tasks: Arc<RwLock<HashMap<String, Vec<String>>>>,
+    /// Task IDs that are part of the current checkpoint dataset
+    /// Used to filter out tasks from other checkpoints in the cache
+    checkpoint_task_ids: Arc<RwLock<HashSet<String>>>,
 }
 
 impl ValidatorWorker {
@@ -175,6 +178,7 @@ impl ValidatorWorker {
             binary_cache: Arc::new(RwLock::new(HashMap::new())),
             task_container_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TASK_CONTAINERS)),
             assigned_tasks: Arc::new(RwLock::new(HashMap::new())),
+            checkpoint_task_ids: Arc::new(RwLock::new(HashSet::new())),
         })
     }
 
@@ -209,6 +213,27 @@ impl ValidatorWorker {
 
         info!("Downloaded {} tasks from registry", task_paths.len());
 
+        // Extract task IDs from downloaded paths (the directory name is the task ID)
+        let checkpoint_ids: HashSet<String> = task_paths
+            .iter()
+            .filter_map(|p| p.file_name())
+            .filter_map(|n| n.to_str())
+            .map(|s| s.to_string())
+            .collect();
+
+        info!(
+            "Checkpoint {} has {} tasks",
+            TASK_DATASET_NAME,
+            checkpoint_ids.len()
+        );
+        debug!("Checkpoint task IDs: {:?}", checkpoint_ids);
+
+        // Store checkpoint task IDs for filtering in get_evaluation_tasks()
+        {
+            let mut guard = self.checkpoint_task_ids.write().await;
+            *guard = checkpoint_ids;
+        }
+
         // Create task registry from downloaded paths (take first 30)
         let tasks_dir = crate::bench::registry::cache_dir();
         let registry = TaskRegistry::new(tasks_dir)?;
@@ -226,6 +251,7 @@ impl ValidatorWorker {
     }
 
     /// Get the first N tasks for evaluation (sorted by ID for determinism)
+    /// Only includes tasks from the current checkpoint dataset
     async fn get_evaluation_tasks(&self) -> Result<Vec<Task>> {
         // Ensure tasks are loaded
         self.load_tasks().await?;
@@ -235,9 +261,22 @@ impl ValidatorWorker {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Task registry not loaded"))?;
 
-        // Get all tasks, sort by ID for deterministic selection, then take first N
-        let mut task_infos: Vec<_> = registry.list_tasks();
+        // Get checkpoint task IDs to filter by
+        let checkpoint_ids = self.checkpoint_task_ids.read().await;
+
+        // Get all tasks, filter to only checkpoint tasks, sort by ID for determinism
+        let mut task_infos: Vec<_> = registry
+            .list_tasks()
+            .into_iter()
+            .filter(|info| checkpoint_ids.contains(&info.id))
+            .collect();
         task_infos.sort_by(|a, b| a.id.cmp(&b.id));
+
+        info!(
+            "Filtered {} tasks from registry to {} checkpoint tasks",
+            registry.count(),
+            task_infos.len()
+        );
 
         let tasks: Vec<Task> = task_infos
             .into_iter()
@@ -421,6 +460,7 @@ impl ValidatorWorker {
             binary_cache: self.binary_cache.clone(),
             task_container_semaphore: self.task_container_semaphore.clone(),
             assigned_tasks: self.assigned_tasks.clone(),
+            checkpoint_task_ids: self.checkpoint_task_ids.clone(),
         }
     }
 
