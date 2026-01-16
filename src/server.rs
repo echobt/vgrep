@@ -1674,6 +1674,10 @@ pub async fn run_server_with_mode(
             // when all tasks are logged via log_task()
             .route("/validator/my_jobs", post(api::get_my_jobs))
             .route(
+                "/validator/get_assigned_tasks",
+                post(api::get_assigned_tasks),
+            )
+            .route(
                 "/validator/agents_to_cleanup",
                 post(api::get_agents_to_cleanup),
             )

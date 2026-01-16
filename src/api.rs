@@ -2077,6 +2077,87 @@ pub async fn get_my_jobs(
 }
 
 // ============================================================================
+// GET ASSIGNED TASKS ENDPOINT (for live refresh)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct GetAssignedTasksRequest {
+    pub validator_hotkey: String,
+    pub agent_hash: String,
+    pub signature: String,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GetAssignedTasksResponse {
+    pub success: bool,
+    pub task_ids: Vec<String>,
+    pub error: Option<String>,
+}
+
+/// POST /api/v1/validator/get_assigned_tasks - Get current assigned tasks for an agent
+/// Allows validators to refresh their task list during evaluation (for live reassignments)
+pub async fn get_assigned_tasks(
+    State(state): State<Arc<ApiState>>,
+    Json(req): Json<GetAssignedTasksRequest>,
+) -> Result<Json<GetAssignedTasksResponse>, (StatusCode, Json<GetAssignedTasksResponse>)> {
+    // Validate hotkey
+    if !is_valid_ss58_hotkey(&req.validator_hotkey) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(GetAssignedTasksResponse {
+                success: false,
+                task_ids: vec![],
+                error: Some("Invalid hotkey format".to_string()),
+            }),
+        ));
+    }
+
+    // Validate timestamp
+    if !is_timestamp_valid(req.timestamp) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(GetAssignedTasksResponse {
+                success: false,
+                task_ids: vec![],
+                error: Some("Timestamp expired".to_string()),
+            }),
+        ));
+    }
+
+    // Verify signature (skip in test mode)
+    let message = format!("get_assigned_tasks:{}:{}", req.agent_hash, req.timestamp);
+    let skip_auth = std::env::var("SKIP_AUTH")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    if !skip_auth && !verify_signature(&req.validator_hotkey, &message, &req.signature) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(GetAssignedTasksResponse {
+                success: false,
+                task_ids: vec![],
+                error: Some("Invalid signature".to_string()),
+            }),
+        ));
+    }
+
+    // Get assigned tasks from DB
+    let task_ids = state
+        .storage
+        .get_validator_tasks(&req.agent_hash, &req.validator_hotkey)
+        .await
+        .map(|tasks| tasks.into_iter().map(|t| t.task_id).collect())
+        .unwrap_or_default();
+
+    Ok(Json(GetAssignedTasksResponse {
+        success: true,
+        task_ids,
+        error: None,
+    }))
+}
+
+// ============================================================================
 // AGENT CLEANUP ENDPOINT
 // ============================================================================
 

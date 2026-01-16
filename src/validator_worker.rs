@@ -908,6 +908,52 @@ impl ValidatorWorker {
         Ok(jobs)
     }
 
+    /// Fetch currently assigned tasks for an agent from server
+    /// Used to refresh task list during evaluation (for live reassignments)
+    async fn fetch_assigned_tasks(&self, agent_hash: &str) -> Result<Vec<String>> {
+        let url = format!(
+            "{}/api/v1/bridge/{}/api/v1/validator/get_assigned_tasks",
+            self.platform_url, self.challenge_id
+        );
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs() as i64;
+
+        let message = format!("get_assigned_tasks:{}:{}", agent_hash, timestamp);
+        let signature = self.sign_message(&message);
+
+        let response = self
+            .http_client
+            .post(&url)
+            .json(&serde_json::json!({
+                "validator_hotkey": self.validator_hotkey,
+                "agent_hash": agent_hash,
+                "timestamp": timestamp,
+                "signature": signature,
+            }))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            anyhow::bail!("get_assigned_tasks request failed: {} - {}", status, text);
+        }
+
+        let body: serde_json::Value = response.json().await?;
+        let task_ids = body["task_ids"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|id| id.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(task_ids)
+    }
+
     /// Download compiled binary via bridge (with caching)
     async fn download_binary(&self, agent_hash: &str) -> Result<Vec<u8>> {
         // Check cache first
@@ -1040,9 +1086,28 @@ impl ValidatorWorker {
         let _temp_path_guard = temp_path;
 
         // Get assigned task IDs for this validator/agent pair
-        let assigned_task_ids: Vec<String> = {
-            let assigned = self.assigned_tasks.read().await;
-            assigned.get(agent_hash).cloned().unwrap_or_default()
+        // Fetch fresh from server to detect live reassignments
+        let assigned_task_ids: Vec<String> = match self.fetch_assigned_tasks(agent_hash).await {
+            Ok(tasks) => {
+                // Update local cache
+                let mut assigned = self.assigned_tasks.write().await;
+                assigned.insert(agent_hash.to_string(), tasks.clone());
+                info!(
+                    "Fetched {} assigned tasks from server for agent {}",
+                    tasks.len(),
+                    short_hash
+                );
+                tasks
+            }
+            Err(e) => {
+                // Fallback to local cache if server unreachable
+                warn!(
+                    "Failed to fetch assigned tasks from server: {}, using cache",
+                    e
+                );
+                let assigned = self.assigned_tasks.read().await;
+                assigned.get(agent_hash).cloned().unwrap_or_default()
+            }
         };
 
         // Get all tasks from terminal-bench@2.0
