@@ -3964,8 +3964,19 @@ async fn make_llm_request(
     }
 
     // Parse response
-    let json: serde_json::Value = serde_json::from_str(&response_text)
-        .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+    let json: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
+        // Include the raw response in the error for debugging
+        let truncated = if response_text.len() > 500 {
+            format!("{}...(truncated)", &response_text[..500])
+        } else {
+            response_text.clone()
+        };
+        anyhow::anyhow!(
+            "Failed to parse response: {} | Raw response: {}",
+            e,
+            truncated
+        )
+    })?;
 
     // Use specialized parser for Responses API
     if use_responses_api {

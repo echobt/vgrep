@@ -1175,7 +1175,7 @@ pub async fn llm_local_proxy(
                 http_status,
                 Json(serde_json::json!({
                     "success": false,
-                    "error": format!("Invalid response from central server: {}", parse_err),
+                    "error": format!("Invalid response from central server: {} | Raw: {}", parse_err, truncated),
                     "status_code": status.as_u16(),
                     "raw_response": truncated,
                     "hint": "Check if central server is running and accessible"
