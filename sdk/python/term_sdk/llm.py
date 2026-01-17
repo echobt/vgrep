@@ -169,12 +169,40 @@ PROVIDERS = {
 
 # Model pricing per 1M tokens (input, output)
 PRICING = {
-    # OpenAI
+    # OpenAI - Legacy models (chat/completions API)
     "gpt-4o": (2.5, 10.0),
     "gpt-4o-mini": (0.15, 0.6),
     "gpt-4-turbo": (10.0, 30.0),
     "gpt-4": (30.0, 60.0),
     "gpt-3.5-turbo": (0.5, 1.5),
+    # OpenAI - GPT-4.1 series (responses API)
+    "gpt-4.1": (2.0, 8.0),
+    "gpt-4.1-mini": (0.4, 1.6),
+    "gpt-4.1-nano": (0.1, 0.4),
+    # OpenAI - GPT-5 series (responses API)
+    "gpt-5": (1.25, 10.0),
+    "gpt-5-mini": (0.25, 2.0),
+    "gpt-5-nano": (0.05, 0.4),
+    "gpt-5-pro": (15.0, 120.0),
+    "gpt-5-codex": (1.25, 10.0),
+    "gpt-5-chat": (1.25, 10.0),
+    "gpt-5.1": (1.25, 10.0),
+    "gpt-5.1-codex": (1.25, 10.0),
+    "gpt-5.1-codex-mini": (0.25, 2.0),
+    "gpt-5.1-codex-max": (1.25, 10.0),
+    "gpt-5.1-chat": (1.25, 10.0),
+    "gpt-5.2": (1.75, 14.0),
+    "gpt-5.2-codex": (1.75, 14.0),
+    "gpt-5.2-pro": (21.0, 168.0),
+    "gpt-5.2-chat": (1.75, 14.0),
+    # OpenAI - o-series reasoning models
+    "o1": (15.0, 60.0),
+    "o1-mini": (3.0, 12.0),
+    "o1-pro": (150.0, 600.0),
+    "o3": (2.0, 8.0),
+    "o3-mini": (1.1, 4.4),
+    "o3-pro": (20.0, 80.0),
+    "o4-mini": (1.1, 4.4),
     # Anthropic
     "claude-3-opus": (15.0, 75.0),
     "claude-3-sonnet": (3.0, 15.0),
@@ -189,6 +217,32 @@ PRICING = {
     "qwen": (0.2, 0.2),
     "glm-4": (0.25, 1.25),
 }
+
+# =============================================================================
+# OpenAI Responses API Support (for GPT-4.1+, GPT-5.x models)
+# =============================================================================
+# These models use the new /v1/responses endpoint instead of /v1/chat/completions
+# See: https://platform.openai.com/docs/api-reference/responses
+
+OPENAI_RESPONSES_API_PREFIXES = [
+    "gpt-4.1",  # GPT-4.1 series
+    "gpt-5",    # All GPT-5.x models
+]
+
+def _is_openai_responses_model(model: str) -> bool:
+    """
+    Check if model uses OpenAI's /v1/responses API instead of /v1/chat/completions.
+    
+    GPT-4.1+ and GPT-5.x models use the new Responses API with different:
+    - Request format: 'input' instead of 'messages', 'instructions' instead of system message
+    - Response format: 'output' array instead of 'choices'
+    - Conversation state: 'previous_response_id' for multi-turn
+    """
+    model_lower = model.lower()
+    # Remove provider prefix if present (e.g., "openai/gpt-5")
+    if "/" in model_lower:
+        model_lower = model_lower.split("/")[-1]
+    return any(model_lower.startswith(prefix) for prefix in OPENAI_RESPONSES_API_PREFIXES)
 
 # Default models per provider
 DEFAULT_MODELS = {
@@ -602,6 +656,537 @@ class LLM:
         return result
     
     # =========================================================================
+    # OpenAI Responses API Support (GPT-4.1+, GPT-5.x)
+    # =========================================================================
+    
+    def _transform_messages_to_responses_input(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Tool]] = None
+    ) -> tuple:
+        """
+        Transform chat messages format to OpenAI Responses API format.
+        
+        The Responses API uses:
+        - 'input' array instead of 'messages'
+        - 'instructions' for system messages
+        - Different item types for user/assistant/tool messages
+        
+        Args:
+            messages: Chat messages in OpenAI chat/completions format
+            tools: Optional list of tools
+            
+        Returns:
+            Tuple of (instructions, input_items, tools_list)
+        """
+        instructions = None
+        input_items = []
+        
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            
+            if role == "system":
+                # System messages become 'instructions' parameter
+                if instructions:
+                    instructions += "\n\n" + (content or "")
+                else:
+                    instructions = content
+                    
+            elif role == "user":
+                # User messages become input items
+                if isinstance(content, str):
+                    input_items.append({
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": content}]
+                    })
+                elif isinstance(content, list):
+                    # Multipart content (text + images)
+                    converted_content = []
+                    for part in content:
+                        if isinstance(part, dict):
+                            if part.get("type") == "text":
+                                converted_content.append({
+                                    "type": "input_text",
+                                    "text": part.get("text", "")
+                                })
+                            elif part.get("type") == "image_url":
+                                converted_content.append({
+                                    "type": "input_image",
+                                    "image_url": part.get("image_url", {}).get("url", "")
+                                })
+                    input_items.append({
+                        "type": "message",
+                        "role": "user",
+                        "content": converted_content
+                    })
+                    
+            elif role == "assistant":
+                # Check for tool_calls in assistant message
+                tool_calls = msg.get("tool_calls", [])
+                if tool_calls:
+                    # Add function call items for each tool call
+                    for tc in tool_calls:
+                        func = tc.get("function", {})
+                        input_items.append({
+                            "type": "function_call",
+                            "id": tc.get("id", ""),
+                            "call_id": tc.get("id", ""),
+                            "name": func.get("name", ""),
+                            "arguments": func.get("arguments", "{}")
+                        })
+                elif content:
+                    # Regular assistant message
+                    input_items.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": content}]
+                    })
+                    
+            elif role == "tool":
+                # Tool results become function_call_output items
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": msg.get("tool_call_id", ""),
+                    "output": content or ""
+                })
+        
+        # Transform tools if provided
+        tools_list = None
+        if tools:
+            tools_list = []
+            for tool in tools:
+                tools_list.append({
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                    "strict": True  # Enable strict mode for better function calling
+                })
+        
+        return instructions, input_items, tools_list
+    
+    def _parse_responses_api_response(
+        self,
+        data: Dict[str, Any],
+        model: str,
+        start: float
+    ) -> LLMResponse:
+        """
+        Parse OpenAI /v1/responses API response format.
+        
+        Response structure:
+        {
+            "id": "resp_...",
+            "status": "completed",
+            "output": [
+                {"type": "message", "content": [{"type": "output_text", "text": "..."}]},
+                {"type": "function_call", "name": "...", "arguments": "...", "id": "..."}
+            ],
+            "usage": {"input_tokens": N, "output_tokens": M}
+        }
+        """
+        # Extract text content and function calls from output
+        text = ""
+        function_calls = []
+        
+        for item in data.get("output", []):
+            item_type = item.get("type", "")
+            
+            if item_type == "message":
+                # Extract text from message content
+                for content in item.get("content", []):
+                    content_type = content.get("type", "")
+                    if content_type == "output_text":
+                        text += content.get("text", "")
+                    elif content_type == "refusal":
+                        text += f"[Refusal: {content.get('refusal', '')}]"
+                        
+            elif item_type == "function_call":
+                # Extract function calls
+                raw_args = item.get("arguments", "{}")
+                try:
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                except json.JSONDecodeError:
+                    args = {}
+                
+                function_calls.append(FunctionCall(
+                    name=item.get("name", ""),
+                    arguments=args if isinstance(args, dict) else {},
+                    id=item.get("id") or item.get("call_id"),
+                    raw_arguments=raw_args if isinstance(raw_args, str) else None
+                ))
+        
+        # Extract usage information
+        usage = data.get("usage", {})
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
+        
+        # OpenAI Responses API doesn't return cost, so we use 0
+        # Cost tracking is only available via OpenRouter which reports usage.cost
+        cost = 0.0
+        latency_ms = int((time.time() - start) * 1000)
+        
+        # Update stats
+        self.total_tokens += total_tokens
+        self.total_cost += cost
+        self.request_count += 1
+        self._update_model_stats(model, total_tokens, cost)
+        
+        _log(f"{model}: {total_tokens} tokens, ${cost:.4f}, {latency_ms}ms (Responses API)")
+        
+        return LLMResponse(
+            text=text,
+            model=data.get("model", model),
+            tokens=total_tokens,
+            cost=cost,
+            latency_ms=latency_ms,
+            function_calls=function_calls if function_calls else [],
+            raw=data
+        )
+    
+    def _chat_openai_responses(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        tools: Optional[List[Tool]],
+        temperature: float,
+        max_tokens: int,
+        start: float,
+        extra_body: Optional[Dict[str, Any]] = None,
+    ) -> LLMResponse:
+        """
+        Handle OpenAI /v1/responses API calls for GPT-4.1+ and GPT-5.x models.
+        
+        This method transforms the standard chat format to the Responses API format
+        and handles the response parsing.
+        """
+        # Transform messages to Responses API format
+        instructions, input_items, tools_list = self._transform_messages_to_responses_input(messages, tools)
+        
+        # Build payload
+        payload: Dict[str, Any] = {
+            "model": model,
+            "input": input_items,
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+            "store": False,  # Don't store responses on OpenAI's side
+        }
+        
+        if instructions:
+            payload["instructions"] = instructions
+        
+        if tools_list:
+            payload["tools"] = tools_list
+            payload["tool_choice"] = "auto"
+        
+        # Merge extra_body if provided
+        if extra_body:
+            for key, value in extra_body.items():
+                if key not in payload:  # Don't override core params
+                    payload[key] = value
+        
+        # Use the Responses API endpoint
+        url = "https://api.openai.com/v1/responses"
+        
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        
+        try:
+            response = self._client.post(url, headers=headers, json=payload)
+        except httpx.RequestError as e:
+            raise LLMError(
+                code="request_error",
+                message=f"OpenAI Responses API request failed: {e}",
+                details={"url": url, "model": model}
+            )
+        
+        if not response.is_success:
+            self._handle_api_error(response, model)
+        
+        data = response.json()
+        
+        # Check for API-level errors
+        if data.get("status") == "failed":
+            error = data.get("error", {})
+            raise LLMError(
+                code=error.get("code", "api_error"),
+                message=error.get("message", "Unknown error"),
+                details={"raw": data}
+            )
+        
+        return self._parse_responses_api_response(data, model, start)
+    
+    def _stream_openai_responses(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        tools: Optional[List[Tool]],
+        temperature: float,
+        max_tokens: int,
+        extra_body: Optional[Dict[str, Any]] = None,
+    ) -> Iterator[str]:
+        """
+        Stream from OpenAI /v1/responses API for GPT-4.1+ and GPT-5.x models.
+        
+        The Responses API streaming uses Server-Sent Events (SSE) with events like:
+        - response.output_item.added
+        - response.output_text.delta
+        - response.function_call_arguments.delta
+        - response.completed
+        """
+        # Transform messages to Responses API format
+        instructions, input_items, tools_list = self._transform_messages_to_responses_input(messages, tools)
+        
+        # Build payload with streaming enabled
+        payload: Dict[str, Any] = {
+            "model": model,
+            "input": input_items,
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+            "store": False,
+            "stream": True,  # Enable streaming
+        }
+        
+        if instructions:
+            payload["instructions"] = instructions
+        
+        if tools_list:
+            payload["tools"] = tools_list
+            payload["tool_choice"] = "auto"
+        
+        if extra_body:
+            for key, value in extra_body.items():
+                if key not in payload:
+                    payload[key] = value
+        
+        url = "https://api.openai.com/v1/responses"
+        
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+        
+        try:
+            with self._client.stream("POST", url, headers=headers, json=payload) as response:
+                if not response.is_success:
+                    # Read error body
+                    error_text = ""
+                    for chunk in response.iter_text():
+                        error_text += chunk
+                    raise LLMError(
+                        code="stream_error",
+                        message=f"OpenAI Responses API stream failed: {response.status_code}",
+                        details={"error": error_text[:500], "model": model}
+                    )
+                
+                for line in response.iter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    
+                    data_str = line[6:]  # Remove "data: " prefix
+                    if data_str == "[DONE]":
+                        break
+                    
+                    try:
+                        event = json.loads(data_str)
+                        event_type = event.get("type", "")
+                        
+                        # Handle text deltas
+                        if event_type == "response.output_text.delta":
+                            delta = event.get("delta", "")
+                            if delta:
+                                yield delta
+                                
+                        # Could also handle function call deltas if needed
+                        # elif event_type == "response.function_call_arguments.delta":
+                        #     ...
+                        
+                    except json.JSONDecodeError:
+                        continue
+                        
+        except httpx.RequestError as e:
+            raise LLMError(
+                code="stream_error",
+                message=f"OpenAI Responses API stream request failed: {e}",
+                details={"url": url, "model": model}
+            )
+    
+    def _stream_openai_responses_full(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        tools: Optional[List[Tool]],
+        temperature: float,
+        max_tokens: int,
+        on_chunk: Optional[Callable[[str], bool]] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
+    ) -> LLMResponse:
+        """
+        Stream from OpenAI Responses API and collect full response with function calls.
+        
+        This version collects all data including function calls from the stream.
+        """
+        start = time.time()
+        full_text = ""
+        function_calls: List[FunctionCall] = []
+        
+        # Track function call building state
+        current_function_call: Optional[Dict[str, Any]] = None
+        function_arguments_buffer = ""
+        
+        # Transform messages
+        instructions, input_items, tools_list = self._transform_messages_to_responses_input(messages, tools)
+        
+        payload: Dict[str, Any] = {
+            "model": model,
+            "input": input_items,
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+            "store": False,
+            "stream": True,
+        }
+        
+        if instructions:
+            payload["instructions"] = instructions
+        if tools_list:
+            payload["tools"] = tools_list
+            payload["tool_choice"] = "auto"
+        if extra_body:
+            for key, value in extra_body.items():
+                if key not in payload:
+                    payload[key] = value
+        
+        url = "https://api.openai.com/v1/responses"
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+        
+        input_tokens = 0
+        output_tokens = 0
+        response_model = model
+        
+        try:
+            with self._client.stream("POST", url, headers=headers, json=payload) as response:
+                if not response.is_success:
+                    error_text = ""
+                    for chunk in response.iter_text():
+                        error_text += chunk
+                    raise LLMError(
+                        code="stream_error",
+                        message=f"Stream failed: {response.status_code}",
+                        details={"error": error_text[:500]}
+                    )
+                
+                for line in response.iter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    
+                    data_str = line[6:]
+                    if data_str == "[DONE]":
+                        break
+                    
+                    try:
+                        event = json.loads(data_str)
+                        event_type = event.get("type", "")
+                        
+                        # Text delta
+                        if event_type == "response.output_text.delta":
+                            delta = event.get("delta", "")
+                            if delta:
+                                full_text += delta
+                                if on_chunk and not on_chunk(delta):
+                                    break
+                        
+                        # Function call started
+                        elif event_type == "response.output_item.added":
+                            item = event.get("item", {})
+                            if item.get("type") == "function_call":
+                                current_function_call = {
+                                    "name": item.get("name", ""),
+                                    "id": item.get("id") or item.get("call_id"),
+                                    "arguments": ""
+                                }
+                                function_arguments_buffer = ""
+                        
+                        # Function call arguments delta
+                        elif event_type == "response.function_call_arguments.delta":
+                            if current_function_call:
+                                delta = event.get("delta", "")
+                                function_arguments_buffer += delta
+                        
+                        # Function call completed
+                        elif event_type == "response.output_item.done":
+                            item = event.get("item", {})
+                            if item.get("type") == "function_call" and current_function_call:
+                                raw_args = item.get("arguments", function_arguments_buffer)
+                                try:
+                                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                                except json.JSONDecodeError:
+                                    args = {}
+                                
+                                function_calls.append(FunctionCall(
+                                    name=current_function_call.get("name", item.get("name", "")),
+                                    arguments=args if isinstance(args, dict) else {},
+                                    id=current_function_call.get("id") or item.get("id"),
+                                    raw_arguments=raw_args if isinstance(raw_args, str) else None
+                                ))
+                                current_function_call = None
+                                function_arguments_buffer = ""
+                        
+                        # Response completed - get usage
+                        elif event_type == "response.completed":
+                            resp = event.get("response", {})
+                            usage = resp.get("usage", {})
+                            input_tokens = usage.get("input_tokens", 0)
+                            output_tokens = usage.get("output_tokens", 0)
+                            response_model = resp.get("model", model)
+                        
+                    except json.JSONDecodeError:
+                        continue
+                        
+        except httpx.RequestError as e:
+            raise LLMError(
+                code="stream_error",
+                message=f"Stream request failed: {e}",
+                details={"url": url}
+            )
+        
+        # Calculate stats
+        total_tokens = input_tokens + output_tokens
+        if total_tokens == 0:
+            # Estimate if not provided
+            total_tokens = len(full_text) // 4
+        
+        # OpenAI Responses API streaming doesn't return cost, so use 0
+        cost = 0.0
+        latency_ms = int((time.time() - start) * 1000)
+        
+        self.total_tokens += total_tokens
+        self.total_cost += cost
+        self.request_count += 1
+        self._update_model_stats(response_model, total_tokens, cost)
+        
+        _log(f"{response_model}: {total_tokens} tokens, ${cost:.4f}, {latency_ms}ms (Responses API stream)")
+        
+        return LLMResponse(
+            text=full_text,
+            model=response_model,
+            tokens=total_tokens,
+            cost=cost,
+            latency_ms=latency_ms,
+            function_calls=function_calls,
+            raw=None
+        )
+    
+    # =========================================================================
     # Public API
     # =========================================================================
     
@@ -760,6 +1345,11 @@ class LLM:
         # Handle Anthropic's different API format
         if self._is_anthropic:
             return self._chat_anthropic(messages, model, tools, temp, tokens, start)
+        
+        # Handle OpenAI Responses API for GPT-4.1+ and GPT-5.x models (direct API only)
+        # OpenRouter handles the transformation itself, so only for direct OpenAI provider
+        if self.provider == "openai" and _is_openai_responses_model(model) and not self._use_platform_bridge:
+            return self._chat_openai_responses(messages, model, tools, temp, tokens, start, extra_body)
         
         # Build payload - different format for platform bridge vs direct API
         if self._use_platform_bridge:
@@ -1205,7 +1795,9 @@ class LLM:
         completion_tokens = usage.get("output_tokens", 0)
         total_tokens = prompt_tokens + completion_tokens
         
-        cost = self._calculate_cost(model, prompt_tokens, completion_tokens)
+        # Anthropic doesn't return cost in their API, so use 0
+        # Cost tracking is only available via OpenRouter which reports usage.cost
+        cost = 0.0
         latency_ms = int((time.time() - start) * 1000)
         
         self.total_tokens += total_tokens
@@ -1252,6 +1844,11 @@ class LLM:
         # Platform bridge streaming mode
         if self._use_platform_bridge:
             yield from self._chat_stream_proxy(messages, model, temp, tokens, extra_body)
+            return
+        
+        # OpenAI Responses API streaming for GPT-4.1+ and GPT-5.x models
+        if self.provider == "openai" and _is_openai_responses_model(model):
+            yield from self._stream_openai_responses(messages, model, None, temp, tokens, extra_body)
             return
         
         payload = {
@@ -1392,6 +1989,15 @@ class LLM:
             extra_body: Extra parameters to merge into request body
         """
         model = self._get_model(model)
+        temp = temperature if temperature is not None else self.temperature
+        tokens = max_tokens if max_tokens is not None else self.max_tokens
+        
+        # Use specialized streaming for OpenAI Responses API (includes function_calls)
+        if self.provider == "openai" and _is_openai_responses_model(model) and not self._use_platform_bridge:
+            return self._stream_openai_responses_full(
+                messages, model, None, temp, tokens, on_chunk, extra_body
+            )
+        
         start = time.time()
         full_text = ""
         
@@ -1406,7 +2012,8 @@ class LLM:
         
         # Estimate tokens (actual count not available in streaming)
         est_tokens = len(full_text) // 4
-        cost = self._calculate_cost(model, est_tokens // 2, est_tokens // 2)
+        # No cost available in streaming without provider support, use 0
+        cost = 0.0
         
         self.total_tokens += est_tokens
         self.total_cost += cost
@@ -1484,47 +2091,46 @@ class LLM:
         """Parse API error and raise LLMError with details."""
         status = response.status_code
         
-        # Try to parse error from response body
+        # Try to parse error from response body - DON'T truncate, show full error
         try:
             body = response.json()
-            error_info = body.get("error", {})
-            error_message = error_info.get("message", response.text[:200])
-            error_type = error_info.get("type", "api_error")
+            # Bridge returns error as string directly in "error" field
+            if isinstance(body.get("error"), str):
+                error_message = body["error"]
+                error_type = "api_error"
+            else:
+                # OpenAI/Anthropic format: {"error": {"message": "...", "type": "..."}}
+                error_info = body.get("error", {})
+                error_message = error_info.get("message", response.text) if isinstance(error_info, dict) else str(error_info)
+                error_type = error_info.get("type", "api_error") if isinstance(error_info, dict) else "api_error"
         except:
-            error_message = response.text[:200] if response.text else "Unknown error"
+            error_message = response.text if response.text else "Unknown error"
             error_type = "api_error"
         
-        # Map HTTP status to error code
+        # Map HTTP status to error code, but KEEP the actual error message
         if status == 401:
             code = "authentication_error"
-            message = "Invalid API key"
         elif status == 403:
             code = "permission_denied"
-            message = "Access denied for this model or endpoint"
         elif status == 404:
             code = "not_found"
-            message = f"Model '{model}' not found"
         elif status == 429:
             code = "rate_limit"
-            message = "Rate limit exceeded"
         elif status == 500:
             code = "server_error"
-            message = "Provider server error"
         elif status == 503:
             code = "service_unavailable"
-            message = "Provider service temporarily unavailable"
         else:
             code = error_type
-            message = error_message
         
+        # Always use the actual error message from the response
         raise LLMError(
             code=code,
-            message=message,
+            message=error_message,
             details={
                 "http_status": status,
                 "model": model,
                 "provider": self.provider,
-                "raw_error": error_message,
             }
         )
     
@@ -1650,7 +2256,9 @@ class LLM:
         completion_tokens = usage.get("completion_tokens", 0)
         total_tokens = prompt_tokens + completion_tokens
         
-        cost = self._calculate_cost(model, prompt_tokens, completion_tokens)
+        # Use provider-reported cost if available (OpenRouter returns usage.cost)
+        # OpenAI doesn't return cost, so default to 0
+        cost = usage.get("cost", 0.0)
         latency_ms = int((time.time() - start) * 1000)
         
         self.total_tokens += total_tokens

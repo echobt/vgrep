@@ -3449,85 +3449,224 @@ struct LlmCallResponse {
     tool_calls: Option<Vec<LlmToolCall>>,
 }
 
-/// Estimate pricing for a model (input, output) in USD per 1M tokens
-/// Returns (input_price, output_price)
-fn estimate_model_pricing(model: &str) -> (f64, f64) {
+// =============================================================================
+// OpenAI Responses API Support (GPT-4.1+, GPT-5.x)
+// =============================================================================
+
+/// Check if model uses OpenAI's /v1/responses API instead of /v1/chat/completions
+fn is_openai_responses_model(model: &str) -> bool {
     let model_lower = model.to_lowercase();
+    model_lower.starts_with("gpt-4.1") || model_lower.starts_with("gpt-5")
+}
 
-    // Claude models
-    if model_lower.contains("claude-3-opus") {
-        return (15.0, 75.0);
-    }
-    if model_lower.contains("claude-3.5-sonnet") || model_lower.contains("claude-3-5-sonnet") {
-        return (3.0, 15.0);
-    }
-    if model_lower.contains("claude-3-sonnet") {
-        return (3.0, 15.0);
-    }
-    if model_lower.contains("claude-3-haiku") || model_lower.contains("claude-3.5-haiku") {
-        return (0.25, 1.25);
+/// Transform chat messages to OpenAI Responses API input format
+fn transform_to_responses_api(
+    messages: &[LlmMessage],
+    model: &str,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    extra_params: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let mut instructions: Option<String> = None;
+    let mut input_items: Vec<serde_json::Value> = Vec::new();
+
+    for msg in messages {
+        match msg.role.as_str() {
+            "system" => {
+                // System messages become 'instructions' parameter
+                let content_str = msg.content.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(ref mut inst) = instructions {
+                    inst.push_str("\n\n");
+                    inst.push_str(content_str);
+                } else {
+                    instructions = Some(content_str.to_string());
+                }
+            }
+            "user" => {
+                // User messages become input items
+                let content_str = msg.content.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+                input_items.push(serde_json::json!({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": content_str}]
+                }));
+            }
+            "assistant" => {
+                // Check for tool_calls
+                if let Some(ref tool_calls) = msg.tool_calls {
+                    for tc in tool_calls {
+                        input_items.push(serde_json::json!({
+                            "type": "function_call",
+                            "id": &tc.id,
+                            "call_id": &tc.id,
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }));
+                    }
+                } else if let Some(ref content) = msg.content {
+                    if let Some(text) = content.as_str() {
+                        if !text.is_empty() {
+                            input_items.push(serde_json::json!({
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": text}]
+                            }));
+                        }
+                    }
+                }
+            }
+            "tool" => {
+                // Tool results become function_call_output items
+                let content_str = msg.content.as_ref().and_then(|v| v.as_str()).unwrap_or("");
+                input_items.push(serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": msg.tool_call_id.as_deref().unwrap_or(""),
+                    "output": content_str
+                }));
+            }
+            _ => {}
+        }
     }
 
-    // GPT models
-    if model_lower.contains("gpt-4o-mini") {
-        return (0.15, 0.6);
-    }
-    if model_lower.contains("gpt-4o") {
-        return (2.5, 10.0);
-    }
-    if model_lower.contains("gpt-4-turbo") {
-        return (10.0, 30.0);
-    }
-    if model_lower.contains("gpt-4") {
-        return (30.0, 60.0);
-    }
-    if model_lower.contains("gpt-3.5") {
-        return (0.5, 1.5);
+    let mut body = serde_json::json!({
+        "model": model,
+        "input": input_items,
+        "max_output_tokens": max_tokens.unwrap_or(64000),
+        "temperature": temperature.unwrap_or(0.7),
+        "store": false,
+    });
+
+    if let Some(inst) = instructions {
+        body["instructions"] = serde_json::Value::String(inst);
     }
 
-    // Grok models
-    if model_lower.contains("grok-2") {
-        return (2.0, 10.0);
-    }
-    if model_lower.contains("grok") {
-        return (5.0, 15.0);
+    // Merge tools from extra_params if present
+    if let Some(extra) = extra_params {
+        if let Some(tools) = extra.get("tools") {
+            // Transform tools to Responses API format
+            if let Some(tools_array) = tools.as_array() {
+                let mut transformed_tools: Vec<serde_json::Value> = Vec::new();
+                for tool in tools_array {
+                    if tool.get("type").and_then(|t| t.as_str()) == Some("function") {
+                        if let Some(func) = tool.get("function") {
+                            transformed_tools.push(serde_json::json!({
+                                "type": "function",
+                                "name": func.get("name"),
+                                "description": func.get("description"),
+                                "parameters": func.get("parameters"),
+                                "strict": true
+                            }));
+                        }
+                    }
+                }
+                if !transformed_tools.is_empty() {
+                    body["tools"] = serde_json::Value::Array(transformed_tools);
+                    body["tool_choice"] = serde_json::json!("auto");
+                }
+            }
+        }
+
+        // Copy other extra params (but not messages, model, etc.)
+        if let Some(extra_obj) = extra.as_object() {
+            for (key, value) in extra_obj {
+                if ![
+                    "tools",
+                    "tool_choice",
+                    "messages",
+                    "model",
+                    "max_tokens",
+                    "temperature",
+                ]
+                .contains(&key.as_str())
+                {
+                    body[key] = value.clone();
+                }
+            }
+        }
     }
 
-    // DeepSeek models (very cheap)
-    if model_lower.contains("deepseek") {
-        return (0.14, 0.28);
+    body
+}
+
+/// Parse OpenAI Responses API response into LlmCallResponse
+fn parse_responses_api_response(json: &serde_json::Value, model: &str) -> LlmCallResponse {
+    let mut content = String::new();
+    let mut tool_calls: Vec<LlmToolCall> = Vec::new();
+
+    if let Some(output) = json.get("output").and_then(|o| o.as_array()) {
+        for item in output {
+            match item.get("type").and_then(|t| t.as_str()) {
+                Some("message") => {
+                    // Extract text from message content
+                    if let Some(contents) = item.get("content").and_then(|c| c.as_array()) {
+                        for c in contents {
+                            if c.get("type").and_then(|t| t.as_str()) == Some("output_text") {
+                                if let Some(text) = c.get("text").and_then(|t| t.as_str()) {
+                                    content.push_str(text);
+                                }
+                            }
+                        }
+                    }
+                }
+                Some("function_call") => {
+                    // Extract function calls
+                    let name = item
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let arguments = item
+                        .get("arguments")
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("{}")
+                        .to_string();
+                    let id = item
+                        .get("id")
+                        .or_else(|| item.get("call_id"))
+                        .and_then(|i| i.as_str())
+                        .map(|s| s.to_string());
+
+                    tool_calls.push(LlmToolCall {
+                        id,
+                        call_type: "function".to_string(),
+                        function: LlmFunctionCall { name, arguments },
+                    });
+                }
+                _ => {}
+            }
+        }
     }
 
-    // Qwen models
-    if model_lower.contains("qwen") {
-        return (0.2, 0.6);
-    }
+    // Extract usage
+    let usage = json.get("usage").map(|u| LlmUsage {
+        prompt_tokens: u.get("input_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32,
+        completion_tokens: u.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32,
+        total_tokens: u.get("total_tokens").and_then(|t| t.as_u64()).unwrap_or(0) as u32,
+        prompt_tokens_details: None,
+    });
 
-    // Llama models
-    if model_lower.contains("llama") {
-        return (0.2, 0.2);
-    }
+    // OpenAI Responses API doesn't return cost, so we set it to None
+    // The SDK will use 0 when cost is not provided
+    let cost_usd: Option<f64> = None;
 
-    // Mixtral
-    if model_lower.contains("mixtral") {
-        return (0.5, 0.5);
+    LlmCallResponse {
+        content: if content.is_empty() {
+            None
+        } else {
+            Some(content)
+        },
+        model: json
+            .get("model")
+            .and_then(|m| m.as_str())
+            .map(|s| s.to_string()),
+        usage,
+        cost_usd,
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
     }
-
-    // GLM models
-    if model_lower.contains("glm") {
-        return (0.25, 1.25);
-    }
-
-    // Gemini models
-    if model_lower.contains("gemini-pro") {
-        return (0.5, 1.5);
-    }
-    if model_lower.contains("gemini") {
-        return (0.35, 1.05);
-    }
-
-    // Default conservative estimate
-    (1.0, 3.0)
 }
 
 /// Transform request body for Anthropic Messages API format
@@ -3656,8 +3795,21 @@ async fn make_llm_request(
 
     let model = model.unwrap_or(default_model);
 
+    // Check if this is an OpenAI Responses API model (GPT-4.1+, GPT-5.x)
+    let use_responses_api = provider == "openai" && is_openai_responses_model(model);
+
+    // Determine the actual endpoint
+    let actual_endpoint = if use_responses_api {
+        "https://api.openai.com/v1/responses"
+    } else {
+        endpoint
+    };
+
     // Build request body
-    let mut body = if raw_request {
+    let mut body = if use_responses_api {
+        // Use Responses API format for GPT-4.1+ and GPT-5.x
+        transform_to_responses_api(messages, model, max_tokens, temperature, extra_params)
+    } else if raw_request {
         // For raw_request mode, build body with messages + model + extra_params
         // This allows full control over tool_calls, tool messages, etc.
         let mut b = serde_json::json!({
@@ -3685,8 +3837,8 @@ async fn make_llm_request(
         })
     };
 
-    // Merge extra_params if provided and not in raw_request mode
-    if !raw_request {
+    // Merge extra_params if provided and not in raw_request mode (and not Responses API)
+    if !raw_request && !use_responses_api {
         if let Some(extra) = extra_params {
             if let (Some(base), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
                 for (key, value) in extra_obj {
@@ -3699,14 +3851,17 @@ async fn make_llm_request(
 
     // Transform request for Anthropic Messages API format
     // Also transform for OpenRouter when using Claude models (they forward to Anthropic API)
-    let is_claude_model = model.to_lowercase().contains("claude");
-    if provider == "anthropic" || (provider == "openrouter" && is_claude_model) {
-        body = transform_for_anthropic(body);
+    // Skip if using Responses API
+    if !use_responses_api {
+        let is_claude_model = model.to_lowercase().contains("claude");
+        if provider == "anthropic" || (provider == "openrouter" && is_claude_model) {
+            body = transform_for_anthropic(body);
+        }
     }
 
     // Make request
     let mut request = client
-        .post(endpoint)
+        .post(actual_endpoint)
         .header("Content-Type", "application/json");
 
     if provider == "anthropic" {
@@ -3754,6 +3909,20 @@ async fn make_llm_request(
     let json: serde_json::Value = serde_json::from_str(&response_text)
         .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
 
+    // Use specialized parser for Responses API
+    if use_responses_api {
+        // Check for API-level errors in Responses API format
+        if json.get("status").and_then(|s| s.as_str()) == Some("failed") {
+            let error = json.get("error").cloned().unwrap_or(serde_json::json!({}));
+            let error_msg = error
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown error");
+            anyhow::bail!("Responses API error: {}", error_msg);
+        }
+        return Ok(parse_responses_api_response(&json, model));
+    }
+
     // Extract content (OpenAI/OpenRouter format)
     let content = json["choices"][0]["message"]["content"]
         .as_str()
@@ -3775,15 +3944,10 @@ async fn make_llm_request(
         .or_else(|| json["usage"]["total_cost"].as_f64())
         .or_else(|| json["cost"].as_f64());
 
-    // Fall back to estimation if provider doesn't report cost
-    let cost_usd = provider_cost.or_else(|| {
-        usage.as_ref().map(|u| {
-            let (input_price, output_price) = estimate_model_pricing(model);
-            let input_cost = (u.prompt_tokens as f64) * input_price / 1_000_000.0;
-            let output_cost = (u.completion_tokens as f64) * output_price / 1_000_000.0;
-            input_cost + output_cost
-        })
-    });
+    // Use provider-reported cost only, no estimation fallback
+    // OpenRouter returns cost in usage.cost, OpenAI doesn't return cost
+    // If provider doesn't report cost, it will be None (SDK will use 0)
+    let cost_usd = provider_cost;
 
     // Extract tool_calls if present (OpenAI/OpenRouter format)
     let tool_calls = json["choices"][0]["message"]["tool_calls"]
@@ -4060,8 +4224,24 @@ async fn make_llm_stream_request(
 
     let model = model.unwrap_or(default_model).to_string();
 
+    // Check if this is an OpenAI Responses API model (GPT-4.1+, GPT-5.x)
+    let use_responses_api = provider == "openai" && is_openai_responses_model(&model);
+
+    // Determine the actual endpoint
+    let actual_endpoint = if use_responses_api {
+        "https://api.openai.com/v1/responses"
+    } else {
+        endpoint
+    };
+
     // Build request body with stream: true
-    let mut body = if raw_request {
+    let mut body = if use_responses_api {
+        // Use Responses API format with streaming
+        let mut responses_body =
+            transform_to_responses_api(messages, &model, max_tokens, temperature, extra_params);
+        responses_body["stream"] = serde_json::json!(true);
+        responses_body
+    } else if raw_request {
         // For raw_request mode, build body with messages + model + extra_params
         // This allows full control over tool_calls, tool messages, etc.
         let mut b = serde_json::json!({
@@ -4091,8 +4271,8 @@ async fn make_llm_stream_request(
         })
     };
 
-    // Merge extra_params if provided and not in raw_request mode
-    if !raw_request {
+    // Merge extra_params if provided and not in raw_request mode (and not Responses API)
+    if !raw_request && !use_responses_api {
         if let Some(extra) = extra_params {
             if let (Some(base), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
                 for (key, value) in extra_obj {
@@ -4104,13 +4284,14 @@ async fn make_llm_stream_request(
 
     // Transform request for Anthropic Messages API format
     // (system messages must be top-level `system` param, not in messages array)
-    if provider == "anthropic" {
+    // Skip if using Responses API
+    if !use_responses_api && provider == "anthropic" {
         body = transform_for_anthropic(body);
     }
 
     let client = reqwest::Client::new();
     let mut request = client
-        .post(endpoint)
+        .post(actual_endpoint)
         .header("Content-Type", "application/json");
 
     // Add provider-specific headers
@@ -4164,6 +4345,7 @@ async fn make_llm_stream_request(
 
     // Spawn a task to process the upstream stream
     let model_for_tracking = model.clone();
+    let is_responses_api = use_responses_api; // Capture for the async block
     tokio::spawn(async move {
         use futures::TryStreamExt;
 
@@ -4197,41 +4379,90 @@ async fn make_llm_stream_request(
 
                     // Parse chunk to extract content and usage info
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                        // Extract content from delta
-                        if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
-                            total_content.push_str(content);
-                        }
+                        if is_responses_api {
+                            // Responses API streaming format
+                            let event_type =
+                                json.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
-                        // Check for usage info (sent in final chunks by OpenAI, OpenRouter, etc.)
-                        if let Some(usage) = json.get("usage") {
-                            let prompt = usage["prompt_tokens"].as_i64().unwrap_or(0) as i32;
-                            let completion =
-                                usage["completion_tokens"].as_i64().unwrap_or(0) as i32;
-                            if prompt > 0 || completion > 0 {
-                                stream_usage = Some((prompt, completion));
+                            match event_type {
+                                "response.output_text.delta" => {
+                                    // Extract text delta
+                                    if let Some(delta) = json.get("delta").and_then(|d| d.as_str())
+                                    {
+                                        total_content.push_str(delta);
+                                        // Convert to OpenAI-compatible format for downstream
+                                        let compat_chunk = serde_json::json!({
+                                            "choices": [{
+                                                "delta": {"content": delta},
+                                                "index": 0
+                                            }]
+                                        });
+                                        let sse_line = format!("data: {}\n\n", compat_chunk);
+                                        if tx.send(Ok(sse_line)).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                                "response.completed" => {
+                                    // Extract usage from completed event
+                                    if let Some(resp) = json.get("response") {
+                                        if let Some(usage) = resp.get("usage") {
+                                            let input =
+                                                usage["input_tokens"].as_i64().unwrap_or(0) as i32;
+                                            let output =
+                                                usage["output_tokens"].as_i64().unwrap_or(0) as i32;
+                                            if input > 0 || output > 0 {
+                                                stream_usage = Some((input, output));
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    // Forward other events as-is (function_call, etc.)
+                                    let sse_line = format!("data: {}\n\n", data);
+                                    if tx.send(Ok(sse_line)).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        } else {
+                            // Standard OpenAI/OpenRouter streaming format
+                            // Extract content from delta
+                            if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                                total_content.push_str(content);
                             }
 
-                            // Check for provider-reported cost
-                            if let Some(cost) = usage["cost"]
-                                .as_f64()
-                                .or_else(|| usage["total_cost"].as_f64())
-                            {
-                                stream_cost = Some(cost);
+                            // Check for usage info (sent in final chunks by OpenAI, OpenRouter, etc.)
+                            if let Some(usage) = json.get("usage") {
+                                let prompt = usage["prompt_tokens"].as_i64().unwrap_or(0) as i32;
+                                let completion =
+                                    usage["completion_tokens"].as_i64().unwrap_or(0) as i32;
+                                if prompt > 0 || completion > 0 {
+                                    stream_usage = Some((prompt, completion));
+                                }
+
+                                // Check for provider-reported cost
+                                if let Some(cost) = usage["cost"]
+                                    .as_f64()
+                                    .or_else(|| usage["total_cost"].as_f64())
+                                {
+                                    stream_cost = Some(cost);
+                                }
+                            }
+
+                            // Also check top-level cost field (some providers)
+                            if stream_cost.is_none() {
+                                if let Some(cost) = json["cost"].as_f64() {
+                                    stream_cost = Some(cost);
+                                }
+                            }
+
+                            // Forward the SSE line
+                            let sse_line = format!("data: {}\n\n", data);
+                            if tx.send(Ok(sse_line)).await.is_err() {
+                                break;
                             }
                         }
-
-                        // Also check top-level cost field (some providers)
-                        if stream_cost.is_none() {
-                            if let Some(cost) = json["cost"].as_f64() {
-                                stream_cost = Some(cost);
-                            }
-                        }
-                    }
-
-                    // Forward the SSE line
-                    let sse_line = format!("data: {}\n\n", data);
-                    if tx.send(Ok(sse_line)).await.is_err() {
-                        break;
                     }
                 }
             }
@@ -4248,12 +4479,9 @@ async fn make_llm_stream_request(
             (est_prompt, est_completion)
         });
 
-        // Use provider-reported cost if available, otherwise calculate from tokens
-        let cost = stream_cost.unwrap_or_else(|| {
-            let (input_price, output_price) = estimate_model_pricing(&model_for_tracking);
-            (prompt_tokens as f64 * input_price / 1_000_000.0)
-                + (completion_tokens as f64 * output_price / 1_000_000.0)
-        });
+        // Use provider-reported cost only, no estimation fallback
+        // OpenRouter returns cost, OpenAI doesn't - if no cost, use 0
+        let cost = stream_cost.unwrap_or(0.0);
 
         if let Err(e) = state
             .storage
