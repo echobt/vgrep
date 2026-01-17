@@ -3771,7 +3771,12 @@ async fn make_llm_request(
     extra_params: Option<&serde_json::Value>,
     raw_request: bool,
 ) -> anyhow::Result<LlmCallResponse> {
-    let client = reqwest::Client::new();
+    // Use a client with 15 minute timeout for LLM calls (reasoning models can take a long time)
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(900)) // 15 min timeout for LLM calls
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
 
     // Determine endpoint and model based on provider
     let (endpoint, default_model, auth_header) = match provider.to_lowercase().as_str() {
@@ -3918,6 +3923,21 @@ async fn make_llm_request(
 
     let status = response.status();
     let response_text = response.text().await?;
+
+    // Handle empty responses explicitly - this usually indicates a timeout or server issue
+    if response_text.is_empty() {
+        warn!(
+            "LLM API: provider returned empty response (status {})",
+            status
+        );
+        return Err(LlmApiError {
+            status_code: status.as_u16(),
+            message: "LLM provider returned empty response - this usually indicates a timeout or server overload".to_string(),
+            error_type: Some("empty_response".to_string()),
+            raw_response: None,
+        }
+        .into());
+    }
 
     if !status.is_success() {
         // Parse error response from provider

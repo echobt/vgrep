@@ -1087,7 +1087,13 @@ pub async fn llm_local_proxy(
         forward_url
     );
 
-    let client = reqwest::Client::new();
+    // Use a client with 15 minute timeout for LLM calls (reasoning models can take a long time)
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(900)) // 15 min timeout for LLM calls
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
     let response = client
         .post(&forward_url)
         .header("Content-Type", "application/json")
@@ -1096,11 +1102,19 @@ pub async fn llm_local_proxy(
         .await
         .map_err(|e| {
             error!("Failed to forward LLM request: {}", e);
+            let error_msg = if e.is_timeout() {
+                "Request to central server timed out after 15 minutes - the LLM provider may be overloaded"
+            } else if e.is_connect() {
+                "Failed to connect to central server - check network connectivity"
+            } else {
+                "Failed to reach central server"
+            };
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
                     "success": false,
-                    "error": format!("Failed to reach central server: {}", e)
+                    "error": format!("{}: {}", error_msg, e),
+                    "retryable": e.is_timeout() || e.is_connect()
                 })),
             )
         })?;
@@ -1118,6 +1132,24 @@ pub async fn llm_local_proxy(
             })),
         )
     })?;
+
+    // Handle empty responses explicitly - this usually indicates a timeout or server issue
+    if body_text.is_empty() {
+        warn!(
+            "LLM local proxy: central server returned empty response (status {})",
+            status
+        );
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "success": false,
+                "error": "Central server returned empty response - this usually indicates a timeout or server overload. The LLM provider may have taken too long to respond.",
+                "status_code": status.as_u16(),
+                "retryable": true,
+                "hint": "The request may have timed out at an intermediate layer. Try again or reduce the context size."
+            })),
+        ));
+    }
 
     // Try to parse as JSON
     let body: serde_json::Value = match serde_json::from_str(&body_text) {
