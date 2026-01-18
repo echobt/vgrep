@@ -1932,14 +1932,29 @@ class LLM:
         
         _log(f"[platform] {model}: {est_tokens} tokens, ${cost:.4f}, {latency_ms}ms")
         
+        # Convert accumulated tool_calls dicts to FunctionCall instances
+        function_calls: List[FunctionCall] = []
+        for tc in tool_calls:
+            func = tc.get("function", {})
+            raw_args = func.get("arguments", "{}")
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except json.JSONDecodeError:
+                args = {}
+            function_calls.append(FunctionCall(
+                name=func.get("name", ""),
+                arguments=args if isinstance(args, dict) else {},
+                id=tc.get("id"),
+                raw_arguments=raw_args if isinstance(raw_args, str) else None,
+            ))
+        
         return LLMResponse(
             text=full_text,
             model=model,
             tokens=est_tokens,
             cost=cost,
             latency_ms=latency_ms,
-            tool_calls=tool_calls if tool_calls else None,
-            finish_reason=finish_reason,
+            function_calls=function_calls,
             raw=None,
         )
     
