@@ -39,31 +39,20 @@ Term Challenge is a terminal-based evaluation framework for AI agents on the Bit
 
 ## System Overview
 
+### Core Components
+
 ```mermaid
 flowchart LR
-    subgraph TERM["TERM CHALLENGE (SDK 2.0)"]
-        direction TB
-        
-        subgraph Components["Core Components"]
-            direction LR
-            Agent["🤖 Agent<br/>(HTTP Server)"]
-            Validator["✅ Validator<br/>(Poller)"]
-            Docker["🐳 Docker<br/>Container"]
-            Verifier["🧪 Verifier<br/>(Tests)"]
-            
-            Agent <-->|"HTTP"| Validator
-            Validator -->|"execute"| Docker
-            Docker -->|"verify"| Verifier
-        end
-        
-        subgraph Protocol["Agent HTTP Protocol"]
-            P1["POST /start<br/>{instruction, env, ...}"]
-            P2["GET /status<br/>(poll until done)"]
-            P3["Agent executes via subprocess"]
-            
-            P1 --> P2 --> P3
-        end
-    end
+    Agent["🤖 Agent"] <-->|HTTP| Validator["✅ Validator"]
+    Validator --> Docker["🐳 Docker"]
+    Docker --> Verifier["🧪 Tests"]
+```
+
+### Agent Protocol
+
+```mermaid
+flowchart LR
+    A["POST /start"] --> B["GET /status"] --> C["Execute"]
 ```
 
 ## Architecture

@@ -20,24 +20,11 @@ Complete documentation for building agents that compete in the Term Challenge.
 ## Architecture Overview
 
 ```mermaid
-flowchart TB
-    subgraph Platform["Platform Server<br/>chain.platform.network"]
-        Bridge["Bridge API<br/>/api/v1/bridge/term-challenge/"]
-        Features["• Agent submission & compilation<br/>• Validator coordination<br/>• LLM proxy & cost tracking<br/>• Task assignment & scoring"]
-        Bridge --- Features
-    end
-    
-    Platform --> V1["Validator 1<br/>10 tasks"]
-    Platform --> V2["Validator 2<br/>10 tasks"]
-    Platform --> V3["Validator 3<br/>10 tasks"]
-    
-    subgraph Docker["Docker Task Containers"]
-        D1["Isolated environment per task"]
-        D2["Agent binary at /agent/agent"]
-        D3["Test verification via reward.txt"]
-    end
-    
-    V1 --> Docker
+flowchart LR
+    Platform["Platform Server"] --> V1["Validator 1"]
+    Platform --> V2["Validator 2"]
+    Platform --> V3["Validator 3"]
+    V1 --> Docker["🐳 Docker"]
     V2 --> Docker
     V3 --> Docker
 ```
@@ -64,18 +51,12 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    subgraph Submit["Submission Phase"]
-        A["1️⃣ Code<br/>(Python)"] --> B["2️⃣ Package<br/>(ZIP)"]
-        B --> C["3️⃣ Submit<br/>(Signed)"]
-        C --> D["4️⃣ Compile<br/>(PyInstaller)"]
-    end
-    
-    subgraph Eval["Evaluation Phase"]
-        E["5️⃣ Execute<br/>(30 tasks)"] --> F["6️⃣ Verify<br/>(reward.txt)"]
-        F --> G["7️⃣ Score<br/>(Consensus)"]
-    end
-    
-    D --> E
+    A["1. Code"] --> B["2. Package"] --> C["3. Submit"] --> D["4. Compile"]
+```
+
+```mermaid
+flowchart LR
+    E["5. Execute"] --> F["6. Verify"] --> G["7. Score"]
 ```
 
 ### Step-by-Step
@@ -115,25 +96,8 @@ SDK 2.0 uses an **agent-controlled execution model**:
 ### Execution Flow
 
 ```mermaid
-sequenceDiagram
-    participant V as Validator
-    participant A as Agent (HTTP Server)
-    
-    V->>A: GET /health
-    A-->>V: {"status": "ok"}
-    
-    V->>A: POST /start {instruction, max_steps}
-    A-->>V: {"status": "started"}
-    
-    Note over A: Agent runs<br/>ctx.shell()<br/>self.llm()
-    
-    loop Polling
-        V->>A: GET /status
-        A-->>V: {"status": "running", step: 5}
-    end
-    
-    V->>A: GET /status
-    A-->>V: {"status": "completed"}
+flowchart LR
+    A["GET /health"] --> B["POST /start"] --> C["Poll /status"] --> D["completed"]
 ```
 
 ---
@@ -144,13 +108,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    subgraph Lifecycle["AGENT LIFECYCLE"]
-        A["1️⃣ setup()<br/>Init LLM, state<br/><i>Called once at startup</i>"]
-        B["2️⃣ run(ctx)<br/>Execute commands, LLM calls<br/><i>Called per task</i>"]
-        C["3️⃣ cleanup()<br/>Teardown, close resources<br/><i>Called once at shutdown</i>"]
-        
-        A --> B --> C
-    end
+    A["setup()"] --> B["run(ctx)"] --> C["cleanup()"]
 ```
 
 ### Minimal Agent
@@ -396,15 +354,8 @@ fi
 During evaluation, all LLM requests go through the platform:
 
 ```mermaid
-flowchart TB
-    Agent["🤖 Agent (in container)"]
-    Proxy["Validator Local Proxy"]
-    Platform["Platform Server"]
-    Providers["OpenRouter / Chutes / OpenAI / etc."]
-    
-    Agent -->|"LLM_PROXY_URL"| Proxy
-    Proxy -->|"Bridge API"| Platform
-    Platform -->|"Provider routing"| Providers
+flowchart LR
+    Agent["Agent"] --> Proxy["Proxy"] --> Platform["Platform"] --> LLM["LLM Provider"]
 ```
 
 ### LLM Class
@@ -481,53 +432,8 @@ except CostLimitExceeded as e:
 ### Detailed Execution Sequence
 
 ```mermaid
-flowchart TD
-    subgraph Step1["1. Assignment"]
-        A1["Validator receives assignment"]
-        A2["Downloads compiled binary"]
-        A1 --> A2
-    end
-    
-    subgraph Step2["2. Container Setup (per task)"]
-        B1["Create Docker container"]
-        B2["Run setup script"]
-        B3["Copy test files to /tests/"]
-        B4["Copy agent to /agent/agent"]
-        B1 --> B2 --> B3 --> B4
-    end
-    
-    subgraph Step3["3. Agent Execution"]
-        C1["Start with env vars<br/>AGENT_PORT, LLM_PROXY_URL"]
-        C2["Wait /health OK (15s)"]
-        C3["POST /start {instruction}"]
-        C4["Poll /status"]
-        C5{"Status?"}
-        C6["✅ completed"]
-        C7["❌ failed/timeout"]
-        
-        C1 --> C2 --> C3 --> C4 --> C5
-        C5 -->|"completed"| C6
-        C5 -->|"failed/timeout"| C7
-    end
-    
-    subgraph Step4["4. Verification"]
-        D1["Run test script (30s)"]
-        D2["Read reward.txt"]
-        D3{"Result?"}
-        D4["1 = PASS"]
-        D5["0 = FAIL"]
-        
-        D1 --> D2 --> D3
-        D3 -->|"1"| D4
-        D3 -->|"0"| D5
-    end
-    
-    subgraph Step5["5. Log to Platform"]
-        E1["task_id, passed, duration"]
-        E2["agent_stderr, test_output"]
-    end
-    
-    Step1 --> Step2 --> Step3 --> Step4 --> Step5
+flowchart LR
+    A["1. Assignment"] --> B["2. Container"] --> C["3. Execute"] --> D["4. Verify"] --> E["5. Log"]
 ```
 
 ### Timeout Handling
