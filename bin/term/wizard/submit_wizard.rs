@@ -212,9 +212,10 @@ pub async fn run_submit_wizard(rpc_url: &str) -> Result<()> {
     println!();
     println!("  Agent Hash: {}", style(&hash).cyan().bold());
     println!();
+    let hash_display = if hash.len() >= 16 { &hash[..16] } else { &hash };
     println!(
         "  Check status: {}",
-        style(format!("term status -H {}", &hash[..16])).yellow()
+        style(format!("term status -H {}", hash_display)).yellow()
     );
     println!("  Leaderboard:  {}", style("term leaderboard").yellow());
     println!();
@@ -553,6 +554,10 @@ fn configure_api_key_simple() -> Result<(String, String)> {
     let api_key: String = Password::with_theme(&ColorfulTheme::default())
         .with_prompt("  Enter API key")
         .interact()?;
+
+    if api_key.trim().is_empty() {
+        anyhow::bail!("API key is required for the selected provider");
+    }
 
     println!(
         "  {} Provider: {}",
