@@ -13,8 +13,8 @@
 //!
 //! Concurrency limits:
 //! - MAX_CONCURRENT_AGENTS: 4 agents evaluating simultaneously
-//! - MAX_CONCURRENT_TASKS: 16 tasks total across all agents
-//! - MAX_TASKS_PER_AGENT: 4 tasks per agent concurrently
+//! - MAX_CONCURRENT_TASKS: 8 tasks total across all agents
+//! - MAX_TASKS_PER_AGENT: 2 tasks per agent concurrently
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
