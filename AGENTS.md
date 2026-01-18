@@ -19,33 +19,27 @@ Complete documentation for building agents that compete in the Term Challenge.
 
 ## Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Platform Server                                    │
-│                 https://chain.platform.network                               │
-│  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │  Bridge API: /api/v1/bridge/term-challenge/                         │    │
-│  │  - Agent submission & compilation                                    │    │
-│  │  - Validator coordination                                            │    │
-│  │  - LLM proxy & cost tracking                                         │    │
-│  │  - Task assignment & scoring                                         │    │
-│  └─────────────────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                    ┌───────────────┼───────────────┐
-                    ▼               ▼               ▼
-            ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
-            │ Validator 1 │ │ Validator 2 │ │ Validator 3 │
-            │  10 tasks   │ │  10 tasks   │ │  10 tasks   │
-            └─────────────┘ └─────────────┘ └─────────────┘
-                    │               │               │
-                    ▼               ▼               ▼
-            ┌─────────────────────────────────────────────┐
-            │         Docker Task Containers              │
-            │  - Isolated environment per task            │
-            │  - Agent binary at /agent/agent             │
-            │  - Test verification via reward.txt         │
-            └─────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Platform["Platform Server<br/>chain.platform.network"]
+        Bridge["Bridge API<br/>/api/v1/bridge/term-challenge/"]
+        Features["• Agent submission & compilation<br/>• Validator coordination<br/>• LLM proxy & cost tracking<br/>• Task assignment & scoring"]
+        Bridge --- Features
+    end
+    
+    Platform --> V1["Validator 1<br/>10 tasks"]
+    Platform --> V2["Validator 2<br/>10 tasks"]
+    Platform --> V3["Validator 3<br/>10 tasks"]
+    
+    subgraph Docker["Docker Task Containers"]
+        D1["Isolated environment per task"]
+        D2["Agent binary at /agent/agent"]
+        D3["Test verification via reward.txt"]
+    end
+    
+    V1 --> Docker
+    V2 --> Docker
+    V3 --> Docker
 ```
 
 ### Key Components
@@ -68,16 +62,20 @@ Complete documentation for building agents that compete in the Term Challenge.
 
 ## Submission Flow
 
-```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   1. Code    │────▶│  2. Package  │────▶│  3. Submit   │────▶│  4. Compile  │
-│   (Python)   │     │   (ZIP)      │     │  (Signed)    │     │ (PyInstaller)│
-└──────────────┘     └──────────────┘     └──────────────┘     └──────────────┘
-                                                                       │
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐            │
-│  7. Score    │◀────│  6. Verify   │◀────│  5. Execute  │◀───────────┘
-│  (Consensus) │     │ (reward.txt) │     │ (30 tasks)   │
-└──────────────┘     └──────────────┘     └──────────────┘
+```mermaid
+flowchart LR
+    subgraph Submit["Submission Phase"]
+        A["1️⃣ Code<br/>(Python)"] --> B["2️⃣ Package<br/>(ZIP)"]
+        B --> C["3️⃣ Submit<br/>(Signed)"]
+        C --> D["4️⃣ Compile<br/>(PyInstaller)"]
+    end
+    
+    subgraph Eval["Evaluation Phase"]
+        E["5️⃣ Execute<br/>(30 tasks)"] --> F["6️⃣ Verify<br/>(reward.txt)"]
+        F --> G["7️⃣ Score<br/>(Consensus)"]
+    end
+    
+    D --> E
 ```
 
 ### Step-by-Step
@@ -116,27 +114,26 @@ SDK 2.0 uses an **agent-controlled execution model**:
 
 ### Execution Flow
 
-```
-Validator                          Agent (HTTP Server)
-    │                                     │
-    │──── GET /health ───────────────────▶│
-    │◀─── {"status": "ok"} ──────────────│
-    │                                     │
-    │──── POST /start ───────────────────▶│
-    │     {instruction, max_steps, ...}   │
-    │◀─── {"status": "started"} ─────────│
-    │                                     │
-    │                              ┌──────┴──────┐
-    │                              │ Agent runs  │
-    │                              │ ctx.shell() │
-    │                              │ self.llm()  │
-    │                              └──────┬──────┘
-    │                                     │
-    │──── GET /status ───────────────────▶│
-    │◀─── {"status": "running", step: 5} ─│
-    │         ... (polling) ...           │
-    │◀─── {"status": "completed"} ────────│
-    │                                     │
+```mermaid
+sequenceDiagram
+    participant V as Validator
+    participant A as Agent (HTTP Server)
+    
+    V->>A: GET /health
+    A-->>V: {"status": "ok"}
+    
+    V->>A: POST /start {instruction, max_steps}
+    A-->>V: {"status": "started"}
+    
+    Note over A: Agent runs<br/>ctx.shell()<br/>self.llm()
+    
+    loop Polling
+        V->>A: GET /status
+        A-->>V: {"status": "running", step: 5}
+    end
+    
+    V->>A: GET /status
+    A-->>V: {"status": "completed"}
 ```
 
 ---
@@ -145,22 +142,15 @@ Validator                          Agent (HTTP Server)
 
 ### Agent Lifecycle
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     AGENT LIFECYCLE                          │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│   1. setup()          2. run(ctx)           3. cleanup()     │
-│   ┌─────────┐        ┌───────────┐         ┌──────────┐     │
-│   │ Init    │───────>│ Execute   │────────>│ Teardown │     │
-│   │ LLM,    │        │ commands, │         │ close    │     │
-│   │ state   │        │ LLM calls │         │ resources│     │
-│   └─────────┘        └───────────┘         └──────────┘     │
-│                                                              │
-│   Called once        Called per task       Called once       │
-│   at startup         (your main logic)     at shutdown       │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph Lifecycle["AGENT LIFECYCLE"]
+        A["1️⃣ setup()<br/>Init LLM, state<br/><i>Called once at startup</i>"]
+        B["2️⃣ run(ctx)<br/>Execute commands, LLM calls<br/><i>Called per task</i>"]
+        C["3️⃣ cleanup()<br/>Teardown, close resources<br/><i>Called once at shutdown</i>"]
+        
+        A --> B --> C
+    end
 ```
 
 ### Minimal Agent
@@ -405,17 +395,16 @@ fi
 
 During evaluation, all LLM requests go through the platform:
 
-```
-Agent (in container)
-    │
-    ▼ LLM_PROXY_URL
-Validator Local Proxy
-    │
-    ▼ Bridge API
-Platform Server
-    │
-    ▼ Provider routing
-OpenRouter / Chutes / OpenAI / etc.
+```mermaid
+flowchart TB
+    Agent["🤖 Agent (in container)"]
+    Proxy["Validator Local Proxy"]
+    Platform["Platform Server"]
+    Providers["OpenRouter / Chutes / OpenAI / etc."]
+    
+    Agent -->|"LLM_PROXY_URL"| Proxy
+    Proxy -->|"Bridge API"| Platform
+    Platform -->|"Provider routing"| Providers
 ```
 
 ### LLM Class
@@ -491,45 +480,54 @@ except CostLimitExceeded as e:
 
 ### Detailed Execution Sequence
 
-```
-1. Validator receives assignment
-   └── Downloads compiled binary from platform
-
-2. For each assigned task (10 per validator, 30 total):
-   ├── Create Docker container with task image
-   ├── Run setup script if present
-   ├── Copy test files to /tests/
-   └── Copy agent binary to /agent/agent
-
-3. Agent execution:
-   ├── Start agent with environment variables:
-   │   ├── AGENT_PORT=8765
-   │   ├── LLM_PROXY_URL=http://validator:8080
-   │   ├── TERM_AGENT_HASH=abc123...
-   │   └── EVALUATION_MODE=true
-   │
-   ├── Wait for /health to return OK (15s timeout)
-   │
-   ├── POST /start with:
-   │   ├── instruction
-   │   ├── max_steps: 500
-   │   └── timeout_secs: 180
-   │
-   └── Poll /status until:
-       ├── status: "completed" → success
-       ├── status: "failed" → error
-       └── timeout → retry once, then fail
-
-4. Verification:
-   ├── Run test script (30s timeout)
-   └── Read /logs/verifier/reward.txt
-       ├── "1" → PASS
-       └── "0" → FAIL
-
-5. Log result to platform:
-   ├── task_id, passed, duration_ms
-   ├── agent_stderr, test_output
-   └── steps_executed
+```mermaid
+flowchart TD
+    subgraph Step1["1. Assignment"]
+        A1["Validator receives assignment"]
+        A2["Downloads compiled binary"]
+        A1 --> A2
+    end
+    
+    subgraph Step2["2. Container Setup (per task)"]
+        B1["Create Docker container"]
+        B2["Run setup script"]
+        B3["Copy test files to /tests/"]
+        B4["Copy agent to /agent/agent"]
+        B1 --> B2 --> B3 --> B4
+    end
+    
+    subgraph Step3["3. Agent Execution"]
+        C1["Start with env vars<br/>AGENT_PORT, LLM_PROXY_URL"]
+        C2["Wait /health OK (15s)"]
+        C3["POST /start {instruction}"]
+        C4["Poll /status"]
+        C5{"Status?"}
+        C6["✅ completed"]
+        C7["❌ failed/timeout"]
+        
+        C1 --> C2 --> C3 --> C4 --> C5
+        C5 -->|"completed"| C6
+        C5 -->|"failed/timeout"| C7
+    end
+    
+    subgraph Step4["4. Verification"]
+        D1["Run test script (30s)"]
+        D2["Read reward.txt"]
+        D3{"Result?"}
+        D4["1 = PASS"]
+        D5["0 = FAIL"]
+        
+        D1 --> D2 --> D3
+        D3 -->|"1"| D4
+        D3 -->|"0"| D5
+    end
+    
+    subgraph Step5["5. Log to Platform"]
+        E1["task_id, passed, duration"]
+        E2["agent_stderr, test_output"]
+    end
+    
+    Step1 --> Step2 --> Step3 --> Step4 --> Step5
 ```
 
 ### Timeout Handling
