@@ -962,6 +962,33 @@ async fn run_package_compilation_steps(
         info!("Adding --collect-all={}", pkg);
     }
 
+    // Get ALL installed packages (including transitive dependencies like pydantic)
+    // and add --collect-all for important ones that PyInstaller often misses
+    let pip_list = container.exec(&["pip", "list", "--format=freeze"]).await?;
+    if pip_list.success() {
+        for line in pip_list.stdout.lines() {
+            let pkg_name = line
+                .split(&['=', '>', '<'][..])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_lowercase()
+                .replace('-', "_");
+            // Collect important packages that have submodules/data files
+            // Skip packages already in user_packages to avoid duplicates
+            if !pkg_name.is_empty()
+                && !user_packages.contains(&pkg_name)
+                && matches!(
+                    pkg_name.as_str(),
+                    "pydantic" | "pydantic_core" | "tiktoken" | "tokenizers" | "regex"
+                )
+            {
+                pyinstaller_args.push(format!("--collect-all={}", pkg_name));
+                info!("Adding --collect-all={} (transitive dependency)", pkg_name);
+            }
+        }
+    }
+
     // Add output paths and entry point
     pyinstaller_args.extend([
         "--distpath=/compile/dist".to_string(),
