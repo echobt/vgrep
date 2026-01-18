@@ -1245,6 +1245,7 @@ pub async fn llm_local_proxy_stream(
         "task_id": req.task_id,
         "extra_params": req.extra_params,
         "raw_request": req.raw_request,
+        "stream": true,  // Signal to bridge that this is a streaming request
     });
 
     info!(
