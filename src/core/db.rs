@@ -159,13 +159,25 @@ impl Database {
         limit: usize,
     ) -> Result<Vec<SearchResult>> {
         let path_prefix_str = path_prefix.to_string_lossy();
-        let like_pattern = format!("{}%", path_prefix_str);
+        
+        // Escape LIKE wildcards: % -> \% and _ -> \_
+        // Note: rusqlite uses \ as default escape char if not specified, 
+        // but it's safer to specify ESCAPE clause or escape carefully.
+        // However, standard SQL often requires defining the escape character.
+        // Let's assume standard behavior where we can use ESCAPE '\'
+        
+        let escaped_prefix = path_prefix_str
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+            
+        let like_pattern = format!("{}%", escaped_prefix);
 
         let mut stmt = self.conn.prepare(
             r"SELECT c.id, c.file_id, f.path, c.content, c.start_line, c.end_line, c.embedding
               FROM chunks c
               JOIN files f ON c.file_id = f.id
-              WHERE f.path LIKE ?",
+              WHERE f.path LIKE ? ESCAPE '\'",
         )?;
 
         let mut results: Vec<SearchResult> = stmt
