@@ -516,7 +516,7 @@ fn run_index(
             }
 
             let db = Database::new(&config.db_path()?)?;
-            let indexer = ServerIndexer::new(db, client, max_size);
+            let indexer = ServerIndexer::with_config(db, client, config);
             indexer.index_directory(&path, force)?;
         }
         Mode::Local => {
@@ -1041,6 +1041,7 @@ fn run_config(action: Option<ConfigAction>, config: &mut Config) -> Result<()> {
                 &format!("{} KB", config.max_file_size / 1024),
             );
             ui::print_key_value("Chunk size", &config.chunk_size.to_string());
+            ui::print_key_value("Batch size", &config.batch_size.to_string());
             ui::print_key_value("Chunk overlap", &config.chunk_overlap.to_string());
 
             ui::print_section("Performance");
@@ -1131,6 +1132,11 @@ fn run_config(action: Option<ConfigAction>, config: &mut Config) -> Result<()> {
                     config.set_chunk_size(size)?;
                     format!("chunk_size = {}", size)
                 }
+                ConfigKey::BatchSize => {
+                    let size: usize = value.parse().context("Invalid size")?;
+                    config.set_batch_size(size)?;
+                    format!("batch_size = {}", size)
+                }
                 ConfigKey::ChunkOverlap => {
                     let overlap: usize = value.parse().context("Invalid overlap")?;
                     config.set_chunk_overlap(overlap)?;
@@ -1172,6 +1178,7 @@ fn run_config(action: Option<ConfigAction>, config: &mut Config) -> Result<()> {
                 ConfigKey::MaxResults => config.max_results.to_string(),
                 ConfigKey::ShowContent => config.show_content.to_string(),
                 ConfigKey::ChunkSize => config.chunk_size.to_string(),
+                ConfigKey::BatchSize => config.batch_size.to_string(),
                 ConfigKey::ChunkOverlap => config.chunk_overlap.to_string(),
                 ConfigKey::NThreads => config.n_threads.to_string(),
                 ConfigKey::ContextSize => config.context_size.to_string(),
