@@ -72,6 +72,10 @@ pub struct Config {
     #[serde(default = "default_chunk_size")]
     pub chunk_size: usize,
 
+    /// Batch size for server embedding requests
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+
     /// Overlap between chunks
     #[serde(default = "default_chunk_overlap")]
     pub chunk_overlap: usize,
@@ -127,6 +131,13 @@ fn default_chunk_size() -> usize {
         .unwrap_or(512)
 }
 
+fn default_batch_size() -> usize {
+    std::env::var("VGREP_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50)
+}
+
 fn default_chunk_overlap() -> usize {
     std::env::var("VGREP_CHUNK_OVERLAP")
         .ok()
@@ -175,6 +186,7 @@ impl Default for Config {
             use_reranker: default_use_reranker(),
             models_dir: None,
             chunk_size: default_chunk_size(),
+            batch_size: default_batch_size(),
             chunk_overlap: default_chunk_overlap(),
             max_file_size: default_max_file_size(),
             max_results: default_max_results(),
@@ -365,6 +377,11 @@ impl Config {
 
     pub fn set_chunk_size(&mut self, size: usize) -> Result<()> {
         self.chunk_size = size;
+        self.save()
+    }
+
+    pub fn set_batch_size(&mut self, size: usize) -> Result<()> {
+        self.batch_size = size;
         self.save()
     }
 

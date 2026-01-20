@@ -397,6 +397,7 @@ pub struct ServerIndexer {
     max_file_size: u64,
     chunk_size: usize,
     chunk_overlap: usize,
+    batch_size: usize,
 }
 
 impl ServerIndexer {
@@ -407,6 +408,22 @@ impl ServerIndexer {
             max_file_size,
             chunk_size: 512,
             chunk_overlap: 64,
+            batch_size: 50,
+        }
+    }
+
+    pub fn with_config(
+        db: Database,
+        client: crate::server::Client,
+        config: &crate::config::Config,
+    ) -> Self {
+        Self {
+            db,
+            client,
+            max_file_size: config.max_file_size,
+            chunk_size: config.chunk_size,
+            chunk_overlap: config.chunk_overlap,
+            batch_size: config.batch_size,
         }
     }
 
@@ -500,7 +517,23 @@ impl ServerIndexer {
             .flat_map(|f| f.chunks.iter().map(|c| c.content.clone()))
             .collect();
 
-        let batch_size = 50; // Process 50 chunks at a time
+        // Calculate dynamic batch size based on chunk size to avoid memory issues
+        // Assuming max payload size around 10MB to be safe
+        let avg_chunk_len = self.chunk_size; // approximate
+        let safe_payload_size = 10 * 1024 * 1024; // 10MB
+        let calculated_batch_size = (safe_payload_size / avg_chunk_len).max(1);
+        
+        // Use the smaller of configured batch size or calculated safe batch size
+        let effective_batch_size = self.batch_size.min(calculated_batch_size);
+        
+        println!(
+            "    {}Batch size: {} (configured: {}, calculated safe limit: {})", 
+            style("ℹ").blue(), 
+            effective_batch_size,
+            self.batch_size,
+            calculated_batch_size
+        );
+
         let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(all_chunks.len());
 
         let pb = ProgressBar::new(all_chunks.len() as u64);
@@ -510,10 +543,44 @@ impl ServerIndexer {
                 .progress_chars("━━─"),
         );
 
-        for batch in all_chunks.chunks(batch_size) {
+        for batch in all_chunks.chunks(effective_batch_size) {
             let batch_refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
-            let embeddings = self.client.embed_batch(&batch_refs)?;
-            all_embeddings.extend(embeddings);
+            
+            // Retry logic
+            let mut retries = 3;
+            let mut backoff = 1;
+            let mut success = false;
+            
+            while retries > 0 {
+                match self.client.embed_batch(&batch_refs) {
+                    Ok(embeddings) => {
+                        all_embeddings.extend(embeddings);
+                        success = true;
+                        break;
+                    }
+                    Err(e) => {
+                        retries -= 1;
+                        if retries == 0 {
+                            // If we fail after retries, we should probably fail the whole process
+                            // or maybe just log and continue? The issue description says "Single batch failure causes entire indexing to fail"
+                            // is "Actual behavior". Expected is "Have retry logic".
+                            // If we fail after retries, we return error.
+                            return Err(e.context(format!("Failed to embed batch after retries")));
+                        }
+                        
+                        // Log warning and sleep
+                        let msg = format!("Batch failed, retrying in {}s... ({})", backoff, e);
+                        pb.println(format!("    {} {}", style("WARN").yellow(), msg));
+                        std::thread::sleep(std::time::Duration::from_secs(backoff));
+                        backoff *= 2;
+                    }
+                }
+            }
+            
+            if !success {
+                 return Err(anyhow::anyhow!("Failed to embed batch after multiple retries"));
+            }
+            
             pb.inc(batch.len() as u64);
         }
 

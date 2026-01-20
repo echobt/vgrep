@@ -274,6 +274,11 @@ fn configure_indexing(config: &mut Config) -> Result<()> {
         style(&config.chunk_size).cyan()
     );
     println!(
+        "  {} Batch size: {}",
+        style("→").dim(),
+        style(&config.batch_size).cyan()
+    );
+    println!(
         "  {} Chunk overlap: {}",
         style("→").dim(),
         style(&config.chunk_overlap).cyan()
@@ -295,6 +300,11 @@ fn configure_indexing(config: &mut Config) -> Result<()> {
         .default(config.chunk_size)
         .interact_text()?;
 
+    let batch_size: usize = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Batch size (server requests)")
+        .default(config.batch_size)
+        .interact_text()?;
+
     let chunk_overlap: usize = Input::with_theme(&ColorfulTheme::default())
         .with_prompt("Chunk overlap (characters)")
         .default(config.chunk_overlap)
@@ -307,6 +317,7 @@ fn configure_indexing(config: &mut Config) -> Result<()> {
 
     config.max_file_size = max_file_size * 1024;
     config.chunk_size = chunk_size;
+    config.batch_size = batch_size;
     config.chunk_overlap = chunk_overlap;
     config.watch_debounce_ms = watch_debounce;
 
